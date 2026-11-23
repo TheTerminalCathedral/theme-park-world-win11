@@ -25,7 +25,8 @@ the human should see after each step.
 | Fix (`TROUBLESHOOTING.md`) | Match the log, propose one change | Approves, tests again |
 | Adapt the code (`BUILD.md`) | Change, build, install in a new copy | Approves, tests |
 
-With no Layer 2, Layer 1 guides the human through the same steps by hand.
+The Human Sandwich needs all three: a chat AI as Layer 1, the human, and a local coding agent as Layer 2. If the
+human has no Layer 2 yet, Layer 1 first helps them set one up. The manual route in `INSTALL.md` is separate.
 
 ## Goal
 

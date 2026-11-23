@@ -11,7 +11,17 @@ does not remove or work around copy protection. See [GAME_SETUP.md](GAME_SETUP.m
 
 ## Install with the Human Sandwich
 
-1. Open a new conversation with your AI (Layer 1).
+The Human Sandwich Model **requires three layers**:
+
+| Layer | Who | What it does |
+|---|---|---|
+| **Layer 1** (COULD) | A **chat AI** | Talks with you, explains, plans, writes the work orders and reviews the results |
+| **The human layer** (SHOULD) | **You** | Decide and approve, start the game, and say what you see |
+| **Layer 2** (DID) | A **local coding agent** on your PC, for example Claude Code or Codex | Reads and changes the files, checks the logs and reports back |
+
+You carry the messages between the two AI layers: Layer 1's work order goes to Layer 2, and Layer 2's
+report goes back to Layer 1. Set up both before you begin.
+1. Open a new conversation with your chat AI (Layer 1).
 2. Copy the **official kick-off message** from
    [AI Madpakken, "Start here"](https://github.com/TheTerminalCathedral/AI-Madpakken#start-here--copy-this-into-a-fresh-layer-1)
    and paste it. Use it from there, so you always get the current one.
@@ -29,14 +39,14 @@ does not remove or work around copy protection. See [GAME_SETUP.md](GAME_SETUP.m
    Read PROJECT.md in that repository first: it holds the facts and limits of this project.
    I launch the game myself, I tell you what I see, and I approve each stage.
    My game is installed in: <FOLDER, or "not installed yet">
-   My Layer 2 is: <for example Claude Code, or "none, guide me by hand">
+   My Layer 2, the local coding agent on this PC, is: <for example Claude Code>
    ```
 
-4. Layer 1 plans with you and prepares the work order for Layer 2, the AI with access to your PC.
-   You approve, Layer 2 does the work and reports, and you test the game.
+4. Layer 1 plans with you and writes the work order. Paste it into Layer 2, your local coding agent.
+   You approve, Layer 2 does the work and reports, you paste the report into Layer 1, and you test the game.
 5. If something fails, tell Layer 1 what you saw. Layer 2 reads the log, and you decide on the next change.
 
-No AI? Follow [GAME_SETUP.md](GAME_SETUP.md), then [INSTALL.md](INSTALL.md), by hand.
+Without the Human Sandwich: follow [GAME_SETUP.md](GAME_SETUP.md), then [INSTALL.md](INSTALL.md), by hand.
 
 ## What it does
 
