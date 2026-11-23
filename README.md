@@ -21,6 +21,7 @@ The Human Sandwich Model **requires three layers**:
 
 You carry the messages between the two AI layers: Layer 1's work order goes to Layer 2, and Layer 2's
 report goes back to Layer 1. Set up both before you begin.
+
 1. Open a new conversation with your chat AI (Layer 1).
 2. Copy the **official kick-off message** from
    [AI Madpakken, "Start here"](https://github.com/TheTerminalCathedral/AI-Madpakken#start-here--copy-this-into-a-fresh-layer-1)
