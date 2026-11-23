@@ -28,6 +28,12 @@ the human should see after each step.
 The Human Sandwich needs all three: a chat AI as Layer 1, the human, and a local coding agent as Layer 2. If the
 human has no Layer 2 yet, Layer 1 first helps them set one up. The manual route in `INSTALL.md` is separate.
 
+## Adapting the patch is part of the project
+
+The patch was made for one PC. When it fails on the human's PC, the layers may change settings and source code,
+within what the human approves, to make the game run there. A problem missing from `TROUBLESHOOTING.md` is
+a new problem to investigate, not a reason to give up.
+
 ## Goal
 
 The human's own copy of the game runs playably on their PC. The human decides when it does.

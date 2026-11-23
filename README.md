@@ -36,7 +36,8 @@ report goes back to Layer 1. Set up both before you begin.
    Help me, step by step, to:
    1. check that the game is installed, patched to version 2.0 and starts (GAME_SETUP.md)
    2. install the mod in a copy of the game, and set it up for my PC (INSTALL.md)
-   3. test it, and if something does not work, find the cause and adapt it (TROUBLESHOOTING.md)
+   3. test it, and if something does not work, find the cause and fix the patch so that the game
+      runs in my environment (TROUBLESHOOTING.md for known problems, BUILD.md to change the code)
    Read PROJECT.md in that repository first: it holds the facts and limits of this project.
    I launch the game myself, I tell you what I see, and I approve each stage.
    My game is installed in: <FOLDER, or "not installed yet">
@@ -48,6 +49,23 @@ report goes back to Layer 1. Set up both before you begin.
 5. If something fails, tell Layer 1 what you saw. Layer 2 reads the log, and you decide on the next change.
 
 Without the Human Sandwich: follow [GAME_SETUP.md](GAME_SETUP.md), then [INSTALL.md](INSTALL.md), by hand.
+
+## Does not work on your PC? Fix the patch with your layers
+
+This patch was made for one PC. Yours has another graphics card, screen, Windows setup or game version, so
+it may need changes. You can use the same [AI Madpakken](https://github.com/TheTerminalCathedral/AI-Madpakken)
+workflow to **adapt the patch itself until the game runs in your environment**. You do not need to be able
+to program.
+
+1. Tell Layer 1 what you see. A photo of the screen helps.
+2. Layer 1 writes a work order, and Layer 2 reads the logs and finds out what is known.
+3. Layer 1 explains the options in plain language. You choose.
+4. Layer 2 makes **one change**, in a copy, with a way back: first the settings, then the code if needed
+   ([BUILD.md](BUILD.md)).
+5. You test. Repeat until it runs, or until you decide to stop.
+
+This is how the patch was made. Success is not guaranteed. The changed version is yours to keep, and to share
+if you like ([REPORT_TEMPLATE.md](REPORT_TEMPLATE.md)).
 
 ## What it does
 
