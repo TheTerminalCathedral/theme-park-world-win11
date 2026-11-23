@@ -1,0 +1,3284 @@
+diff --git a/GDI/WndProc.cpp b/GDI/WndProc.cpp
+index 1828c4e2..f850ebbd 100644
+--- a/GDI/WndProc.cpp
++++ b/GDI/WndProc.cpp
+@@ -25,6 +25,11 @@
+ #include "Settings\Settings.h"
+ #include "Logging\Logging.h"
+ 
++// TPW: in ddraw\IDirectDrawX.cpp
++bool TPWPillarboxSizing(HWND hWnd, WPARAM Edge, RECT* pRect);
++bool TPWIsPillarboxActive();
++bool TPWIsPillarboxFramed();
++
+ #undef DefWindowProc
+ 
+ namespace WndProc
+@@ -334,6 +339,14 @@ LRESULT CALLBACK WndProc::Handler(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lPa
+ 	// Handle focus change on function exit
+ 	ScopedWindowFocusChange HandleFocusChange(hWnd, pDataStruct, IsWindowForeground, WindowFocusChange);
+ 
++	// TPW: log messages that can make the game quit
++	if (Msg == WM_CLOSE || Msg == WM_DESTROY || Msg == WM_QUERYENDSESSION || Msg == WM_ENDSESSION ||
++		(Msg == WM_SYSCOMMAND && (wParam & 0xFFF0) == SC_CLOSE))
++	{
++		Logging::Log() << __FUNCTION__ << " TPW: window got quit-related message " << Logging::hex(Msg) << " wParam " << Logging::hex(wParam) <<
++			" foreground " << IsWindowForeground << " iconic " << IsWindowIconic;
++	}
++
+ 	// Handle other window messages
+ 	switch (Msg)
+ 	{
+@@ -382,6 +395,17 @@ LRESULT CALLBACK WndProc::Handler(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lPa
+ 				PostMessage(hWnd, WM_ACTIVATE, WA_ACTIVE, 0);
+ 			}
+ 
++			// TPW: the activation messages were filtered while the window was minimized, so the game never
++			// re-acquired its DirectInput mouse; tell it directly that it is active again
++			else if (TPWIsPillarboxActive() && !IsIconic(hWnd) && IsForeground(hWnd))
++			{
++				LOG_LIMIT(10, __FUNCTION__ << " TPW: sending activation to the game after restore");
++				pDataStruct->WindowActive.data = WA_ACTIVE;
++				pDataStruct->WindowActive.iconic = FALSE;
++				CallWndProc(pWndProc, hWnd, WM_ACTIVATEAPP, TRUE, 0);
++				CallWndProc(pWndProc, hWnd, WM_ACTIVATE, WA_ACTIVE, 0);
++			}
++
+ 			return 0;
+ 		}
+ 		break;
+@@ -487,6 +511,33 @@ LRESULT CALLBACK WndProc::Handler(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lPa
+ 		}
+ 		break;
+ 
++	case WM_SETCURSOR:
++		// TPW: the game hides the cursor in its window, show the normal one on the title bar and frame of the
++		// resizable window so the edges can be found
++		if (TPWIsPillarboxFramed() && (HWND)wParam == hWnd)
++		{
++			static int ShownCount = 0;
++			if (LOWORD(lParam) != HTCLIENT)
++			{
++				if (!ShownCount)
++				{
++					int Count = 0;
++					do
++					{
++						Count = ShowCursor(TRUE);
++						ShownCount++;
++					} while (Count < 0 && ShownCount < 100);
++				}
++				return DefWndProc(hWnd, Msg, wParam, lParam);
++			}
++			while (ShownCount > 0)
++			{
++				ShowCursor(FALSE);
++				ShownCount--;
++			}
++		}
++		break;
++
+ 	case WM_KILLFOCUS:
+ 		// Filter messages for loss of focus or minimize
+ 		if (Config.HideWindowFocusChanges && wParam == FALSE)
+@@ -561,6 +612,11 @@ LRESULT CALLBACK WndProc::Handler(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lPa
+ 				hWnd << " " << Logging::hex(Msg) << " " << wParam << " " << lParam << " IsIconic: " << IsWindowIconic);
+ 			return DefWndProc(hWnd, Msg, wParam, lParam);
+ 		}
++		// TPW: keep the aspect ratio of the resizable pillarbox window
++		if (Msg == WM_SIZING && TPWPillarboxSizing(hWnd, wParam, reinterpret_cast<RECT*>(lParam)))
++		{
++			return TRUE;
++		}
+ 		break;
+ 
+ 	case WM_WINDOWPOSCHANGED:
+diff --git a/Settings/Settings.cpp b/Settings/Settings.cpp
+index c08fac6d..94bb1fa0 100644
+--- a/Settings/Settings.cpp
++++ b/Settings/Settings.cpp
+@@ -554,6 +554,9 @@ void Settings::SetDefaultConfigSettings()
+ 	Config.PrimaryBufferSamples = 44100;
+ 	Config.PrimaryBufferChannels = 2;
+ 	Config.AudioFadeOutDelayMS = 20;
++	Config.DdrawConvertHomogeneousToWorldFOV = 60.0f;
++	Config.DdrawConvertHomogeneousToWorldNearPlane = 0.1f;
++	Config.DdrawConvertHomogeneousToWorldFarPlane = 5000.0f;
+ 	SetValue("ExcludeProcess", "dxwnd.exe", &Config.ExcludeProcess);
+ 	SetValue("ExcludeProcess", "dgVoodooSetup.exe", &Config.ExcludeProcess);
+ }
+diff --git a/Settings/Settings.h b/Settings/Settings.h
+index 0097b4c5..e182d923 100644
+--- a/Settings/Settings.h
++++ b/Settings/Settings.h
+@@ -53,6 +53,18 @@ inline std::ostream& operator<<(std::ostream& os, const DHEX& dhex) {
+ 	visit(DdrawFillSurfaceColor) \
+ 	visit(DdrawFilterActivateApp) \
+ 	visit(DdrawFixedFunctionVertex) \
++	visit(DdrawConvertHomogeneousW) \
++	visit(DdrawConvertHomogeneousToWorld) \
++	visit(DdrawConvertHomogeneousToWorldFOV) \
++	visit(DdrawConvertHomogeneousToWorldNearPlane) \
++	visit(DdrawConvertHomogeneousToWorldFarPlane) \
++	visit(DdrawConvertHomogeneousUIDepth) \
++	visit(DdrawConvertHomogeneousDiagnostics) \
++	visit(DdrawConvertHomogeneousDeferUI) \
++	visit(DdrawConvertHomogeneousToWorldUseRHW) \
++	visit(DdrawSkipRenderTargetReadback) \
++	visit(DdrawConvertHomogeneousLeanUIStateBlocks) \
++	visit(DdrawPillarboxWindowed) \
+ 	visit(DdrawForceMipMapAutoGen) \
+ 	visit(DdrawFlipFillColor) \
+ 	visit(DdrawKeepAllInterfaceCache) \
+@@ -296,6 +308,18 @@ struct CONFIG
+ 	bool DdrawUseNativeResolution = false;		// Uses the current screen resolution for Dd7to9
+ 	bool DdrawVertexLockDiscard = false;		// Sets the discard flag for vertex Lock
+ 	bool DdrawFixedFunctionVertex = false;		// Disables vertex shaders
++	bool DdrawConvertHomogeneousW = false;		// Handle D3DFVF_XYZRHW primitives with the homogeneous conversion below (ported from the DK2 RTX Remix fork)
++	bool DdrawConvertHomogeneousToWorld = false;	// Convert D3DFVF_XYZRHW primitives back into a world space with a synthetic camera, needed for RTX Remix
++	float DdrawConvertHomogeneousToWorldFOV = 60.0f;		// Field of view of the synthetic camera used to reconstruct the 3D world
++	float DdrawConvertHomogeneousToWorldNearPlane = 0.1f;	// Near plane of the synthetic camera
++	float DdrawConvertHomogeneousToWorldFarPlane = 5000.0f;	// Far plane of the synthetic camera
++	float DdrawConvertHomogeneousUIDepth = 0.0f;			// Draws with all vertices at screen z below this value stay pre-transformed as UI (0 = convert all)
++	bool DdrawConvertHomogeneousDiagnostics = false;		// Logs every draw of a sampled scene (bounded) to help classify UI and world geometry
++	bool DdrawConvertHomogeneousDeferUI = false;			// Queues UI draws and replays them at EndScene, after all world geometry
++	bool DdrawConvertHomogeneousToWorldUseRHW = false;	// Reconstruct world positions from w = 1/rhw instead of screen z
++	DWORD DdrawPillarboxWindowed = 0;				// TPW: pillarbox window: 0) borderless on a black backdrop 1) borderless above the taskbar, desktop visible around it 2) movable window with a title bar
++	bool DdrawConvertHomogeneousLeanUIStateBlocks = false;	// Deferred UI state blocks record only the fixed-function states UI drawing uses instead of D3DSBT_ALL
++	DWORD DdrawSkipRenderTargetReadback = 0;		// Small BltFast copies from the render target into system memory surfaces: 1 = fill colour-keyed ones with the key, others via a small GPU readback; 2 = no readback for the others (destination left unchanged)
+ 	DWORD DdrawClippedWidth = 0;				// Used to scaled Direct3d9 to use this width when using Dd7to9
+ 	DWORD DdrawClippedHeight = 0;				// Used to scaled Direct3d9 to use this height when using Dd7to9
+ 	DWORD DdrawCustomWidth = 0;					// Custom resolution width for Dd7to9 when using DdrawLimitDisplayModeCount, resolution must be supported by video card and monitor
+diff --git a/d3d9/IDirect3DSurface9.cpp b/d3d9/IDirect3DSurface9.cpp
+index 1cdd5866..86e71790 100644
+--- a/d3d9/IDirect3DSurface9.cpp
++++ b/d3d9/IDirect3DSurface9.cpp
+@@ -276,6 +276,11 @@ void m_IDirect3DSurface9::ReleaseInterface()
+ 
+ void m_IDirect3DSurface9::SetTextureContainer(m_IDirect3DTexture9* pTexture)
+ {
++	// TPW: a reused surface wrapper must leave its old texture's list first
++	if (pTextureContainer && pTextureContainer != pTexture)
++	{
++		pTextureContainer->RemoveSurfaceFromList(this);
++	}
+ 	pTextureContainer = pTexture;
+ 	pTextureContainer->AddSurfaceToList(this);
+ 	m_pDeviceEx->AddSurfaceToList(this);
+diff --git a/d3d9/IDirect3DTexture9.cpp b/d3d9/IDirect3DTexture9.cpp
+index 37ecdfa0..27f87ae0 100644
+--- a/d3d9/IDirect3DTexture9.cpp
++++ b/d3d9/IDirect3DTexture9.cpp
+@@ -218,7 +218,8 @@ HRESULT m_IDirect3DTexture9::GetSurfaceLevel(THIS_ UINT Level, IDirect3DSurface9
+ 	{
+ 		D3d9Wrapper::genericQueryInterface(IID_IDirect3DSurface9, WrapperID, (LPVOID*)ppSurfaceLevel, m_pDeviceEx);
+ 
+-		if (Level == 0)
++		// TPW: the texture/surface links are only used for multisample emulation, skip them otherwise
++		if (Level == 0 && m_pDeviceEx->GetDeviceMultiSampleFlag())
+ 		{
+ 			reinterpret_cast<m_IDirect3DSurface9*>(*ppSurfaceLevel)->SetTextureContainer(this);
+ 		}
+@@ -262,17 +263,33 @@ HRESULT m_IDirect3DTexture9::AddDirtyRect(THIS_ CONST RECT* pDirtyRect)
+ // Helper functions
+ void m_IDirect3DTexture9::PrepareReadingFromTexture()
+ {
++	// TPW: emulated surfaces only exist with multisampling
++	if (!m_pDeviceEx->GetDeviceMultiSampleFlag())
++	{
++		return;
++	}
+ 	for (const auto& pSurface : SurfaceLevelList)
+ 	{
+-		pSurface->CopyToRealSurface();
++		// TPW: never dereference a missing surface level
++		if (pSurface)
++		{
++			pSurface->CopyToRealSurface();
++		}
+ 	}
+ }
+ 
+ void m_IDirect3DTexture9::PrepareWritingToTexture(bool IncreamentUSN)
+ {
+-	for (const auto& pSurface : SurfaceLevelList)
++	// TPW: emulated surfaces only exist with multisampling
++	if (m_pDeviceEx->GetDeviceMultiSampleFlag())
+ 	{
+-		pSurface->CopyToRealSurface();
++		for (const auto& pSurface : SurfaceLevelList)
++		{
++			if (pSurface)
++			{
++				pSurface->CopyToRealSurface();
++			}
++		}
+ 	}
+ 	if (IncreamentUSN)
+ 	{
+diff --git a/ddraw/IDirect3DDeviceX.cpp b/ddraw/IDirect3DDeviceX.cpp
+index fe92aa2d..c51d406d 100644
+--- a/ddraw/IDirect3DDeviceX.cpp
++++ b/ddraw/IDirect3DDeviceX.cpp
+@@ -14,6 +14,7 @@
+ *   3. This notice may not be removed or altered from any source distribution.
+ */
+ 
++#include <set>
+ #include "ddraw.h"
+ #include "d3d9\d3d9External.h"
+ #include "Utils\Utils.h"
+@@ -22,6 +23,108 @@ const DWORD ReserveCount = 64;
+ 
+ using namespace DdrawWrapper;
+ 
++TPWSURFACETIMING TPWSurfaceTiming;
++volatile LONG TPWTextureGeneration = 0;
++DWORD TPWRenderThreadId = 0;
++thread_local LONG TPWScopedSurfaceTimer::Depth = 0;
++
++// TPW stall trace: when no scene has begun for 2 s, count the wrapper functions each thread calls and log the top list
++volatile bool Logging::StallTrace::Enabled = false;
++namespace {
++	struct {
++		SRWLOCK Lock = SRWLOCK_INIT;
++		volatile DWORD LastSceneTick = 0;
++		DWORD WindowStartTick = 0;
++		DWORD WindowSceneTick = 0;
++		std::map<std::pair<DWORD, const char*>, DWORD> Counts;
++		DWORD Dumps = 0;
++	} TPWStall;
++}
++
++void Logging::StallTrace::Record(const char* Name)
++{
++	const DWORD LastScene = TPWStall.LastSceneTick;
++	if (!LastScene || TPWStall.Dumps >= 3)
++	{
++		return;
++	}
++	const DWORD Now = GetTickCount();
++	if (Now - LastScene < 2000)
++	{
++		return;
++	}
++
++	AcquireSRWLockExclusive(&TPWStall.Lock);
++	if (!TPWStall.WindowStartTick || TPWStall.WindowSceneTick != LastScene)
++	{
++		TPWStall.WindowStartTick = Now;
++		TPWStall.WindowSceneTick = LastScene;
++		TPWStall.Counts.clear();
++	}
++	TPWStall.Counts[{ GetCurrentThreadId(), Name }]++;
++
++	// Log the most called functions after collecting for 4 seconds
++	if (Now - TPWStall.WindowStartTick >= 4000)
++	{
++		std::vector<std::pair<std::pair<DWORD, const char*>, DWORD>> Sorted(TPWStall.Counts.begin(), TPWStall.Counts.end());
++		std::sort(Sorted.begin(), Sorted.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
++		Logging::Log() << __FUNCTION__ << " TPW stall trace " << (TPWStall.Dumps + 1) << ": no scene for " << (Now - LastScene) <<
++			" ms, render thread " << TPWRenderThreadId << ", calls in the last " << (Now - TPWStall.WindowStartTick) << " ms:";
++		for (size_t i = 0; i < Sorted.size() && i < 30; i++)
++		{
++			Logging::Log() << __FUNCTION__ << "   thread " << Sorted[i].first.first << " " << Sorted[i].second << "x " <<
++				(Sorted[i].first.second ? Sorted[i].first.second : "?");
++		}
++		TPWStall.Dumps++;
++		TPWStall.WindowStartTick = 0;
++	}
++	ReleaseSRWLockExclusive(&TPWStall.Lock);
++}
++
++namespace {
++	// TPW draw diagnostics (lightning hunt): unusual draws grouped by type, vertex format, blending and texture
++	struct TPWDRAWDIAGKEY
++	{
++		const char* Func;
++		DWORD PrimitiveType, VertexTypeDesc, AlphaBlend, SrcBlend, DestBlend, ZWrite;
++		void* Texture;
++		bool operator<(const TPWDRAWDIAGKEY& o) const
++		{
++			return std::tie(Func, PrimitiveType, VertexTypeDesc, AlphaBlend, SrcBlend, DestBlend, ZWrite, Texture) <
++				std::tie(o.Func, o.PrimitiveType, o.VertexTypeDesc, o.AlphaBlend, o.SrcBlend, o.DestBlend, o.ZWrite, o.Texture);
++		}
++	};
++	struct TPWDRAWDIAGSTATS
++	{
++		DWORD Draws = 0, Vertices = 0, Samples = 0;
++		float MinX = FLT_MAX, MinY = FLT_MAX, MaxX = -FLT_MAX, MaxY = -FLT_MAX, MinZ = FLT_MAX, MaxZ = -FLT_MAX, MinRHW = FLT_MAX, MaxRHW = -FLT_MAX;
++	};
++	std::map<TPWDRAWDIAGKEY, TPWDRAWDIAGSTATS> TPWDrawDiag;
++	DWORD TPWDrawDiagByType[8] = {};
++	DWORD TPWDrawDiagSamples = 0;
++	std::set<void*> TPWDrawDiagDumped;
++
++	// TPW timing diagnostics
++	inline LONGLONG QpcNow()
++	{
++		LARGE_INTEGER Now;
++		QueryPerformanceCounter(&Now);
++		return Now.QuadPart;
++	}
++
++	inline DWORD QpcToMs(LONGLONG Ticks)
++	{
++		static LONGLONG Frequency = 0;
++		if (!Frequency)
++		{
++			LARGE_INTEGER Freq;
++			QueryPerformanceFrequency(&Freq);
++			Frequency = Freq.QuadPart ? Freq.QuadPart : 1;
++		}
++		return (DWORD)(Ticks * 1000 / Frequency);
++	}
++}
++
+ #define CheckDeviceInterface(name, device) \
+ { \
+ 	HRESULT c_hr = CheckInterface(name, device); \
+@@ -1366,6 +1469,80 @@ HRESULT m_IDirect3DDeviceX::BeginScene()
+ #endif
+ 
+ 			PrepDevice();
++
++			// Set the synthetic camera before any draw call so RTX Remix can detect it
++			if (Config.DdrawConvertHomogeneousW && Config.DdrawConvertHomogeneousToWorld)
++			{
++				UpdateToWorldMatrices();
++
++				ToWorld.SceneCount++;
++				ToWorld.SceneStartTime = QpcNow();
++				TPWRenderThreadId = GetCurrentThreadId();
++				TPWStall.LastSceneTick = GetTickCount();
++				Logging::StallTrace::Enabled = Config.DdrawConvertHomogeneousDiagnostics;
++
++				// Drop UI draws left over from a scene that never reached EndScene
++				ClearUIQueue();
++				ToWorld.SceneFlushWorldMarks.clear();
++
++				// Diagnostics: log every draw of one scene every 1800 scenes (at most 12 scenes)
++				ToWorld.SceneDrawIndex = 0;
++				ToWorld.DumpThisScene = Config.DdrawConvertHomogeneousDiagnostics && ToWorld.DumpCount < 12 && ToWorld.SceneCount % 1800 == 0;
++				if (ToWorld.DumpThisScene)
++				{
++					ToWorld.DumpCount++;
++					ToWorld.DumpLines = 0;
++					Logging::Log() << __FUNCTION__ << " ToWorld dump " << ToWorld.DumpCount << " of scene " << ToWorld.SceneCount <<
++						" (columns: draw vcount icount z[min,max] rhw[min,max] tex zenable zwrite zfunc ablend src dst atest fog)";
++				}
++
++				// Log statistics on the first scene and then every 10 seconds
++				const DWORD Tick = GetTickCount();
++				if (ToWorld.SceneCount == 1 || Tick - ToWorld.LastStatsTick >= 10000)
++				{
++					Logging::Log() << __FUNCTION__ << " ToWorld: scenes in last interval=" << (ToWorld.SceneCount - ToWorld.LastStatsSceneCount) <<
++						" (" << (ToWorld.LastStatsTick ? (Tick - ToWorld.LastStatsTick) : 0) << " ms) state blocks created=" << ToWorld.StateBlocksCreated <<
++						" UI draws merged=" << ToWorld.UIDrawsMerged << " UI replay draw calls=" << ToWorld.UIReplayDrawCalls <<
++						" UI trigger draws=" << ToWorld.UITriggerDraws <<
++						" RHW vertices=" << ToWorld.RHWConverted << " RHW fallback vertices=" << ToWorld.RHWFallback;
++					Logging::Log() << __FUNCTION__ << " ToWorld timing (ms in last interval): in scene=" << QpcToMs(ToWorld.TimeInScene) <<
++						" UI replay=" << QpcToMs(ToWorld.TimeReplay) << " (state block apply=" << QpcToMs(ToWorld.TimeApplyStateBlock) <<
++						" x" << ToWorld.ApplyCount << ", UI draws=" << QpcToMs(ToWorld.TimeUIDraws) <<
++						", restore block=" << QpcToMs(ToWorld.TimeRestoreBlock) << ") state block create=" << QpcToMs(ToWorld.TimeCreateStateBlock) <<
++						" end scene+present=" << QpcToMs(ToWorld.TimePresent);
++					static LONG LastTextureGeneration = 0;
++					const LONG TextureGeneration = TPWTextureGeneration;
++					Logging::Log() << __FUNCTION__ << " ToWorld state block cache: reused=" << ToWorld.StateBlocksReused <<
++						" entries=" << ToWorld.UIStateBlockCacheEntries << " clears=" << ToWorld.StateBlockCacheClears <<
++						" lean=" << ToWorld.LeanStateBlocks << " lean failures=" << ToWorld.LeanStateBlockFailures <<
++						" texture releases in interval=" << (TextureGeneration - LastTextureGeneration);
++					LastTextureGeneration = TextureGeneration;
++					{
++						static const char* Names[TPW_TIME_COUNT] = { "lock", "unlock", "blt", "bltfast", "flip" };
++						std::string Line;
++						for (int t = 0; t < TPW_TIME_COUNT; t++)
++						{
++							const LONGLONG Ticks = InterlockedExchange64(&TPWSurfaceTiming.Ticks[t], 0);
++							const LONG Count = InterlockedExchange(&TPWSurfaceTiming.Count[t], 0);
++							const LONG Other = InterlockedExchange(&TPWSurfaceTiming.OtherThreadCount[t], 0);
++							Line += std::string(" ") + Names[t] + "=" + std::to_string(QpcToMs(Ticks)) + "/" + std::to_string(Count) + "/" + std::to_string(Other);
++						}
++						Logging::Log() << __FUNCTION__ << " ToWorld surface timing (ms/calls/other thread calls in last interval):" << Line.c_str();
++					}
++					ToWorld.TimeInScene = ToWorld.TimeReplay = ToWorld.TimeApplyStateBlock = ToWorld.TimeUIDraws = 0;
++					ToWorld.TimeRestoreBlock = ToWorld.TimeCreateStateBlock = ToWorld.TimePresent = 0;
++					ToWorld.ApplyCount = 0;
++					TPWLogDrawDiag();
++					ToWorld.LastStatsTick = Tick;
++					ToWorld.LastStatsSceneCount = ToWorld.SceneCount;
++					Logging::Log() << __FUNCTION__ << " ToWorld: scene " << ToWorld.SceneCount << " valid=" << ToWorld.IsValid <<
++						" converted DrawPrimitive=" << ToWorld.ConvertedDraws << " DrawIndexedPrimitive=" << ToWorld.ConvertedIndexedDraws <<
++						" kept as UI=" << ToWorld.UIDraws << " UI queued=" << ToWorld.UIQueued << " replayed=" << ToWorld.UIReplayed <<
++						" failed=" << ToWorld.UIReplayFailed << " world draws before replay=" << ToWorld.WorldDrawsBeforeReplay <<
++						" texture flushes=" << ToWorld.TextureFlushes << " (other thread=" << ToWorld.TextureFlushesOtherThread <<
++						", skipped outside scene=" << ToWorld.FlushesSkipped << ") flushes before final 3D=" << ToWorld.FlushesBeforeFinal3D;
++				}
++			}
+ 		}
+ 
+ 		return GetReturnResult(hr);
+@@ -1407,12 +1584,33 @@ HRESULT m_IDirect3DDeviceX::EndScene()
+ 
+ 			ScopedCriticalSection ThreadLockDD(DdrawWrapper::GetDDCriticalSection());
+ 
++			// Draw queued UI after all world geometry of the scene
++			ReplayUIDraws();
++
++			// Count texture-triggered flushes that happened before the final world draw of this scene
++			for (DWORD Mark : ToWorld.SceneFlushWorldMarks)
++			{
++				if (Mark < ToWorld.WorldDraws)
++				{
++					ToWorld.FlushesBeforeFinal3D++;
++				}
++			}
++			ToWorld.SceneFlushWorldMarks.clear();
++
++			const LONGLONG EndSceneStart = QpcNow();
++			if (ToWorld.SceneStartTime)
++			{
++				ToWorld.TimeInScene += EndSceneStart - ToWorld.SceneStartTime;
++				ToWorld.SceneStartTime = 0;
++			}
++
+ 			hr = (*d3d9Device)->EndScene();
+ 
+ 			if (SUCCEEDED(hr))
+ 			{
+ 				IsInScene = false;
+ 			}
++			ToWorld.TimePresent += QpcNow() - EndSceneStart;
+ 
+ #ifdef ENABLE_PROFILING
+ 			Logging::Log() << __FUNCTION__ << " (" << this << ") hr = " << (D3DERR)hr << " Timing = " << Logging::GetTimeLapseInUS(startTime);
+@@ -1421,7 +1619,9 @@ HRESULT m_IDirect3DDeviceX::EndScene()
+ 
+ 		if (SUCCEEDED(hr) && lpCurrentRenderTargetX)
+ 		{
++			const LONGLONG PresentStart = QpcNow();
+ 			lpCurrentRenderTargetX->EndWritePresent(nullptr, 0, false, false);
++			ToWorld.TimePresent += QpcNow() - PresentStart;
+ 		}
+ 
+ #ifdef ENABLE_PROFILING
+@@ -2934,6 +3134,15 @@ HRESULT m_IDirect3DDeviceX::DrawPrimitive(D3DPRIMITIVETYPE dptPrimitiveType, DWO
+ 
+ 		dwFlags = (dwFlags & D3DDP_FORCE_DWORD);
+ 
++		TPWRecordDrawDiag("DrawPrimitive", dptPrimitiveType, dwVertexTypeDesc, lpVertices, dwVertexCount, 0);
++
++		// Convert pre-transformed vertices back into world space
++		const bool IsToWorld = ConvertHomogeneousToWorld(dwVertexTypeDesc, lpVertices, dwVertexCount);
++		if (IsToWorld)
++		{
++			ToWorld.ConvertedDraws++;
++		}
++
+ 		// Set vertex type
+ 		if (FAILED(SetVertexType(dwVertexTypeDesc, dwFlags)))
+ 		{
+@@ -2944,8 +3153,48 @@ HRESULT m_IDirect3DDeviceX::DrawPrimitive(D3DPRIMITIVETYPE dptPrimitiveType, DWO
+ 		// Handle dwFlags
+ 		SetDrawStates(dwVertexTypeDesc, dwFlags, DirectXVersion);
+ 
+-		// Draw primitive UP
+-		HRESULT hr = (*d3d9Device)->DrawPrimitiveUP(dptPrimitiveType, GetNumberOfPrimitives(dptPrimitiveType, dwVertexCount), lpVertices, GetVertexStride(dwVertexTypeDesc));
++		// Viewport scaling must not change the synthetic camera
++		if (IsToWorld)
++		{
++			(*d3d9Device)->SetTransform(D3DTS_PROJECTION, ToWorld.CurrentProjection);
++		}
++
++		// RTX Remix only treats orthographic draws as UI when z writes are disabled.
++		// Deferred UI keeps the game's z states; the replay disables z writes for a single trigger draw instead.
++		DWORD UIZWriteEnable = FALSE;
++		const bool IsToWorldUI = IsToWorld && ToWorld.LastDrawIsUI;
++		const bool UIZWriteChanged = IsToWorldUI && !Config.DdrawConvertHomogeneousDeferUI;
++		if (UIZWriteChanged)
++		{
++			GetD9RenderState(D3DRS_ZWRITEENABLE, &UIZWriteEnable);
++			(*d3d9Device)->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
++		}
++
++		// Draw primitive UP, or queue UI draws until the end of the scene
++		// Sky draws use viewport min depth 1 so RTX Remix renders them as sky
++		D3DVIEWPORT9 SkyViewport = {};
++		const bool SkyViewportChanged = IsToWorld && ToWorld.LastDrawIsSky && SUCCEEDED((*d3d9Device)->GetViewport(&SkyViewport));
++		if (SkyViewportChanged)
++		{
++			D3DVIEWPORT9 Viewport = SkyViewport;
++			Viewport.MinZ = 1.0f;
++			Viewport.MaxZ = 1.0f;
++			(*d3d9Device)->SetViewport(&Viewport);
++		}
++
++		HRESULT hr = (IsToWorldUI && Config.DdrawConvertHomogeneousDeferUI &&
++			QueueUIDraw(dptPrimitiveType, GetNumberOfPrimitives(dptPrimitiveType, dwVertexCount), lpVertices, dwVertexCount, GetVertexStride(dwVertexTypeDesc), dwVertexTypeDesc, dwFlags)) ? D3D_OK :
++			(*d3d9Device)->DrawPrimitiveUP(dptPrimitiveType, GetNumberOfPrimitives(dptPrimitiveType, dwVertexCount), lpVertices, GetVertexStride(dwVertexTypeDesc));
++
++		if (SkyViewportChanged)
++		{
++			(*d3d9Device)->SetViewport(&SkyViewport);
++		}
++
++		if (UIZWriteChanged)
++		{
++			(*d3d9Device)->SetRenderState(D3DRS_ZWRITEENABLE, UIZWriteEnable);
++		}
+ 
+ 		// Handle dwFlags
+ 		RestoreDrawStates(hr, dwFlags, DirectXVersion);
+@@ -3021,6 +3270,15 @@ HRESULT m_IDirect3DDeviceX::DrawIndexedPrimitive(D3DPRIMITIVETYPE dptPrimitiveTy
+ 
+ 		dwFlags = (dwFlags & D3DDP_FORCE_DWORD);
+ 
++		TPWRecordDrawDiag("DrawIndexedPrimitive", dptPrimitiveType, dwVertexTypeDesc, lpVertices, dwVertexCount, dwIndexCount);
++
++		// Convert pre-transformed vertices back into world space
++		const bool IsToWorld = ConvertHomogeneousToWorld(dwVertexTypeDesc, lpVertices, dwVertexCount, dwIndexCount);
++		if (IsToWorld)
++		{
++			ToWorld.ConvertedIndexedDraws++;
++		}
++
+ 		// Set vertex type
+ 		if (FAILED(SetVertexType(dwVertexTypeDesc, dwFlags)))
+ 		{
+@@ -3031,8 +3289,48 @@ HRESULT m_IDirect3DDeviceX::DrawIndexedPrimitive(D3DPRIMITIVETYPE dptPrimitiveTy
+ 		// Handle dwFlags
+ 		SetDrawStates(dwVertexTypeDesc, dwFlags, DirectXVersion);
+ 
++		// Viewport scaling must not change the synthetic camera
++		if (IsToWorld)
++		{
++			(*d3d9Device)->SetTransform(D3DTS_PROJECTION, ToWorld.CurrentProjection);
++		}
++
++		// RTX Remix only treats orthographic draws as UI when z writes are disabled.
++		// Deferred UI keeps the game's z states; the replay disables z writes for a single trigger draw instead.
++		DWORD UIZWriteEnable = FALSE;
++		const bool IsToWorldUI = IsToWorld && ToWorld.LastDrawIsUI;
++		const bool UIZWriteChanged = IsToWorldUI && !Config.DdrawConvertHomogeneousDeferUI;
++		if (UIZWriteChanged)
++		{
++			GetD9RenderState(D3DRS_ZWRITEENABLE, &UIZWriteEnable);
++			(*d3d9Device)->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
++		}
++
+ 		// Draw indexed primitive UP
+-		HRESULT hr = (*d3d9Device)->DrawIndexedPrimitiveUP(dptPrimitiveType, 0, dwVertexCount, GetNumberOfPrimitives(dptPrimitiveType, dwIndexCount), lpwIndices, D3DFMT_INDEX16, lpVertices, GetVertexStride(dwVertexTypeDesc));
++		// Sky draws use viewport min depth 1 so RTX Remix renders them as sky
++		D3DVIEWPORT9 SkyViewport = {};
++		const bool SkyViewportChanged = IsToWorld && ToWorld.LastDrawIsSky && SUCCEEDED((*d3d9Device)->GetViewport(&SkyViewport));
++		if (SkyViewportChanged)
++		{
++			D3DVIEWPORT9 Viewport = SkyViewport;
++			Viewport.MinZ = 1.0f;
++			Viewport.MaxZ = 1.0f;
++			(*d3d9Device)->SetViewport(&Viewport);
++		}
++
++		HRESULT hr = (IsToWorldUI && Config.DdrawConvertHomogeneousDeferUI &&
++			QueueUIDraw(dptPrimitiveType, GetNumberOfPrimitives(dptPrimitiveType, dwIndexCount), lpVertices, dwVertexCount, GetVertexStride(dwVertexTypeDesc), dwVertexTypeDesc, dwFlags, lpwIndices, dwIndexCount)) ? D3D_OK :
++			(*d3d9Device)->DrawIndexedPrimitiveUP(dptPrimitiveType, 0, dwVertexCount, GetNumberOfPrimitives(dptPrimitiveType, dwIndexCount), lpwIndices, D3DFMT_INDEX16, lpVertices, GetVertexStride(dwVertexTypeDesc));
++
++		if (SkyViewportChanged)
++		{
++			(*d3d9Device)->SetViewport(&SkyViewport);
++		}
++
++		if (UIZWriteChanged)
++		{
++			(*d3d9Device)->SetRenderState(D3DRS_ZWRITEENABLE, UIZWriteEnable);
++		}
+ 
+ 		// Handle dwFlags
+ 		RestoreDrawStates(hr, dwFlags, DirectXVersion);
+@@ -3181,6 +3479,7 @@ HRESULT m_IDirect3DDeviceX::DrawPrimitiveStrided(D3DPRIMITIVETYPE dptPrimitiveTy
+ 
+ 	if (Config.Dd7to9)
+ 	{
++		TPWRecordDrawDiag("DrawPrimitiveStrided", dptPrimitiveType, 0, nullptr, dwVertexCount, 0);
+ 		if (dwVertexCount == 0)
+ 		{
+ 			return D3D_OK; // Nothing to draw
+@@ -3266,6 +3565,7 @@ HRESULT m_IDirect3DDeviceX::DrawIndexedPrimitiveStrided(D3DPRIMITIVETYPE dptPrim
+ 
+ 	if (Config.Dd7to9)
+ 	{
++		TPWRecordDrawDiag("DrawIndexedPrimitiveStrided", dptPrimitiveType, 0, nullptr, dwVertexCount, dwIndexCount);
+ 		if (dwVertexCount == 0 || dwIndexCount == 0)
+ 		{
+ 			return D3D_OK; // Nothing to draw
+@@ -3357,6 +3657,7 @@ HRESULT m_IDirect3DDeviceX::DrawPrimitiveVB(D3DPRIMITIVETYPE dptPrimitiveType, L
+ 
+ 	if (Config.Dd7to9)
+ 	{
++		TPWRecordDrawDiag("DrawPrimitiveVB", dptPrimitiveType, 0, nullptr, dwNumVertices, 0);
+ 		if (dwNumVertices == 0)
+ 		{
+ 			return D3D_OK; // Nothing to draw
+@@ -3461,6 +3762,7 @@ HRESULT m_IDirect3DDeviceX::DrawIndexedPrimitiveVB(D3DPRIMITIVETYPE dptPrimitive
+ 
+ 	if (Config.Dd7to9)
+ 	{
++		TPWRecordDrawDiag("DrawIndexedPrimitiveVB", dptPrimitiveType, 0, nullptr, dwNumVertices, dwIndexCount);
+ 		if (dwNumVertices == 0 || dwIndexCount == 0)
+ 		{
+ 			return D3D_OK; // Nothing to draw
+@@ -4961,6 +5263,22 @@ void m_IDirect3DDeviceX::InitInterface(DWORD DirectXVersion)
+ 
+ void m_IDirect3DDeviceX::ReleaseInterface()
+ {
++	// Never flush UI through a released device
++	if (UIQueueOwner == this)
++	{
++		UIQueueOwner = nullptr;
++	}
++
++	// Release cached UI state blocks while the d3d9 device still exists, at exit just forget them
++	if (!Config.Exiting && d3d9Device && *d3d9Device)
++	{
++		ClearUIStateBlockCache();
++	}
++	if (UIStateBlockCacheOwner == this)
++	{
++		UIStateBlockCacheOwner = nullptr;
++	}
++
+ 	if (Config.Exiting)
+ 	{
+ 		return;
+@@ -6973,6 +7291,1006 @@ HRESULT m_IDirect3DDeviceX::ProcessVertices(UINT SrcStartIndex, UINT DestIndex,
+ 	return GetReturnResult(hr);
+ }
+ 
++void m_IDirect3DDeviceX::UpdateToWorldMatrices()
++{
++	ToWorld.IsValid = false;
++
++	D3DVIEWPORT9 Viewport9 = {};
++	if (FAILED((*d3d9Device)->GetViewport(&Viewport9)) || !Viewport9.Width || !Viewport9.Height)
++	{
++		return;
++	}
++
++	const float width = (float)Viewport9.Width;
++	const float height = (float)Viewport9.Height;
++
++	// Synthetic perspective camera, positioned above the scene and looking down at 45 degrees
++	const DirectX::XMMATRIX proj = DirectX::XMMatrixPerspectiveFovLH(
++		Config.DdrawConvertHomogeneousToWorldFOV * (DirectX::XM_PI / 180.0f), width / height,
++		Config.DdrawConvertHomogeneousToWorldNearPlane, Config.DdrawConvertHomogeneousToWorldFarPlane);
++	const DirectX::XMMATRIX view = DirectX::XMMatrixLookToLH(
++		DirectX::XMVectorSet(0.0f, 800.0f, -800.0f, 0.0f),
++		DirectX::XMVector3Normalize(DirectX::XMVectorSet(0.0f, -0.707f, 0.707f, 0.0f)),
++		DirectX::XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f));
++
++	// Screen (0..width, 0..height, z) to NDC
++	const DirectX::XMMATRIX screenToNDC = DirectX::XMMatrixSet(
++		2.0f / width, 0.0f, 0.0f, 0.0f,
++		0.0f, -2.0f / height, 0.0f, 0.0f,
++		0.0f, 0.0f, 1.0f, 0.0f,
++		-1.0f, 1.0f, 0.0f, 1.0f);
++
++	// Screen -> NDC -> clip -> view -> world
++	const DirectX::XMMATRIX screenToWorld = DirectX::XMMatrixMultiply(screenToNDC, DirectX::XMMatrixInverse(nullptr, DirectX::XMMatrixMultiply(view, proj)));
++
++	DirectX::XMStoreFloat4x4((DirectX::XMFLOAT4X4*)&ToWorld.ProjectionMatrix, proj);
++	DirectX::XMStoreFloat4x4((DirectX::XMFLOAT4X4*)&ToWorld.ViewMatrix, view);
++	DirectX::XMStoreFloat4x4(&ToWorld.ScreenToWorld, screenToWorld);
++
++	// Values to rebuild view-space positions from w = 1/rhw (matching XMMatrixPerspectiveFovLH)
++	DirectX::XMStoreFloat4x4(&ToWorld.ViewToWorld, DirectX::XMMatrixInverse(nullptr, view));
++	ToWorld.ViewportX = (float)Viewport9.X;
++	ToWorld.ViewportY = (float)Viewport9.Y;
++	ToWorld.ViewportWidth = width;
++	ToWorld.ViewportHeight = height;
++	ToWorld.TanHalfFovY = tanf(Config.DdrawConvertHomogeneousToWorldFOV * (DirectX::XM_PI / 180.0f) * 0.5f);
++	ToWorld.TanHalfFovX = ToWorld.TanHalfFovY * (width / height);
++
++	// Orthographic screen-space projection for UI draws, so RTX Remix can treat them as UI (orthographicIsUI)
++	DirectX::XMStoreFloat4x4((DirectX::XMFLOAT4X4*)&ToWorld.UIProjectionMatrix, DirectX::XMMatrixOrthographicOffCenterLH(0.0f, width, height, 0.0f, 0.0f, 1.0f));
++
++	(*d3d9Device)->SetTransform(D3DTS_VIEW, &ToWorld.ViewMatrix);
++	(*d3d9Device)->SetTransform(D3DTS_PROJECTION, &ToWorld.ProjectionMatrix);
++
++	ToWorld.IsValid = true;
++}
++
++bool m_IDirect3DDeviceX::ConvertHomogeneousToWorld(DWORD& dwVertexTypeDesc, LPVOID& lpVertices, DWORD dwVertexCount, DWORD dwIndexCount)
++{
++	if (!Config.DdrawConvertHomogeneousW || !Config.DdrawConvertHomogeneousToWorld ||
++		(dwVertexTypeDesc & D3DFVF_POSITION_MASK) != D3DFVF_XYZRHW || !lpVertices || !dwVertexCount)
++	{
++		return false;
++	}
++
++	if (!ToWorld.IsValid)
++	{
++		UpdateToWorldMatrices();
++		if (!ToWorld.IsValid)
++		{
++			return false;
++		}
++	}
++
++	const UINT stride = GetVertexStride(dwVertexTypeDesc);
++	const UINT targetStride = stride - sizeof(float);
++	const UINT restSize = stride - sizeof(float) * 4;
++
++	// Classify UI: the game draws 2D overlays with rhw 1 in its own UI depth band (all vertices at screen z below UIDepth)
++	bool IsUI = false;
++	bool IsSky = false;
++	{
++		float minZ = FLT_MAX, maxZ = -FLT_MAX, minRHW = FLT_MAX, maxRHW = -FLT_MAX;
++		const BYTE* scanVertex = (const BYTE*)lpVertices;
++		for (DWORD x = 0; x < dwVertexCount; x++, scanVertex += stride)
++		{
++			const float* pos = (const float*)scanVertex;
++			minZ = min(minZ, pos[2]);
++			maxZ = max(maxZ, pos[2]);
++			minRHW = min(minRHW, pos[3]);
++			maxRHW = max(maxRHW, pos[3]);
++		}
++
++		IsUI = Config.DdrawConvertHomogeneousUIDepth > 0.0f && maxZ < Config.DdrawConvertHomogeneousUIDepth &&
++			fabsf(minRHW - 1.0f) < 0.002f && fabsf(maxRHW - 1.0f) < 0.002f;
++
++		// Lightning and rain: additive ribbons and streak batches laid over the scene. As world geometry the path tracer
++		// shows them as zig-zag sheets and long lines, so keep them flat screen overlays like the original game.
++		// Single sparkles (4 vertices) stay in the world.
++		if (!IsUI && dwVertexCount >= 8 && CurrentTextureSurfaceX[0] &&
++			DeviceStates.RenderState[D3DRENDERSTATE_ALPHABLENDENABLE].State &&
++			DeviceStates.RenderState[D3DRENDERSTATE_DESTBLEND].State == D3DBLEND_ONE &&
++			!DeviceStates.RenderState[D3DRENDERSTATE_ZWRITEENABLE].State)
++		{
++			IsUI = true;
++			static DWORD LightningLogged = 0;
++			if (LightningLogged < 50)
++			{
++				LightningLogged++;
++				Logging::Log() << __FUNCTION__ << " TPW glow effect kept as screen overlay, vcount=" << dwVertexCount <<
++					" z=[" << minZ << "," << maxZ << "] tex=" << (void*)CurrentTextureSurfaceX[0];
++			}
++		}
++
++		// Sky: the game draws its sky dome at the far plane (all screen z at 1) without z writes, with rhw values that go
++		// negative. Converted with rhw it folds behind the camera, so lay it out as a backdrop at a fixed far depth and
++		// mark it as sky for RTX Remix (viewport min depth 1, see rtx.skyMinZThreshold).
++		IsSky = !IsUI && minZ >= 0.9999f && !DeviceStates.RenderState[D3DRENDERSTATE_ZWRITEENABLE].State;
++		if (IsSky)
++		{
++			ToWorld.SkyDraws++;
++			static DWORD SkyLogged = 0;
++			if (SkyLogged < 20)
++			{
++				SkyLogged++;
++				const BYTE* v0 = (const BYTE*)lpVertices;
++				const DWORD Diffuse = (dwVertexTypeDesc & D3DFVF_DIFFUSE) ? *(const DWORD*)(v0 + sizeof(float) * 4) : 0;
++				const UINT TexOffset = sizeof(float) * 4 + ((dwVertexTypeDesc & D3DFVF_DIFFUSE) ? 4 : 0) + ((dwVertexTypeDesc & D3DFVF_SPECULAR) ? 4 : 0);
++				const float* uv = (dwVertexTypeDesc & D3DFVF_TEXCOUNT_MASK) ? (const float*)(v0 + TexOffset) : nullptr;
++				Logging::Log() << __FUNCTION__ << " TPW sky drawn as backdrop, vcount=" << dwVertexCount <<
++					" rhw=[" << minRHW << "," << maxRHW << "] tex=" << (void*)CurrentTextureSurfaceX[0] <<
++					" fvf=" << Logging::hex(dwVertexTypeDesc) <<
++					" blend=" << DeviceStates.RenderState[D3DRENDERSTATE_ALPHABLENDENABLE].State << " " <<
++					DeviceStates.RenderState[D3DRENDERSTATE_SRCBLEND].State << "/" << DeviceStates.RenderState[D3DRENDERSTATE_DESTBLEND].State <<
++					" alphatest=" << DeviceStates.RenderState[D3DRENDERSTATE_ALPHATESTENABLE].State <<
++					" fog=" << DeviceStates.RenderState[D3DRENDERSTATE_FOGENABLE].State <<
++					" texblend=" << DeviceStates.RenderState[D3DRENDERSTATE_TEXTUREMAPBLEND].State <<
++					" zfunc=" << DeviceStates.RenderState[D3DRENDERSTATE_ZFUNC].State <<
++					" diffuse0=" << Logging::hex(Diffuse) << " uv0=" << (uv ? uv[0] : 0.0f) << "," << (uv ? uv[1] : 0.0f) <<
++					" size=" << (CurrentTextureSurfaceX[0] ? CurrentTextureSurfaceX[0]->GetD9Width() : 0) << "x" <<
++					(CurrentTextureSurfaceX[0] ? CurrentTextureSurfaceX[0]->GetD9Height() : 0);
++			}
++
++			// Diagnostics: save each sky texture once
++			static std::set<void*> SkyDumped;
++			if (Config.DdrawConvertHomogeneousDiagnostics && CurrentTextureSurfaceX[0] && SkyDumped.size() < 16 &&
++				SkyDumped.insert((void*)CurrentTextureSurfaceX[0]).second)
++			{
++				char Path[MAX_PATH] = {};
++				GetModuleFileNameA(nullptr, Path, MAX_PATH);
++				char* Slash = strrchr(Path, '\\');
++				if (Slash)
++				{
++					*(Slash + 1) = '\0';
++					strcat_s(Path, "tpw-texdump");
++					CreateDirectoryA(Path, nullptr);
++					char File[MAX_PATH];
++					sprintf_s(File, "%s\\sky_%p_%u.bmp", Path, (void*)CurrentTextureSurfaceX[0], (UINT)SkyDumped.size());
++					CurrentTextureSurfaceX[0]->TPWDumpTextureToBMP(File);
++				}
++			}
++		}
++
++		ToWorld.SceneDrawIndex++;
++		if (ToWorld.DumpThisScene && ToWorld.DumpLines < 600)
++		{
++			ToWorld.DumpLines++;
++			Logging::Log() << "ToWorld draw " << ToWorld.SceneDrawIndex << " " << dwVertexCount << " " << dwIndexCount <<
++				" z[" << minZ << "," << maxZ << "] rhw[" << minRHW << "," << maxRHW << "] " << (void*)CurrentTextureSurfaceX[0] << " " <<
++				DeviceStates.RenderState[D3DRENDERSTATE_ZENABLE].State << " " <<
++				DeviceStates.RenderState[D3DRENDERSTATE_ZWRITEENABLE].State << " " <<
++				DeviceStates.RenderState[D3DRENDERSTATE_ZFUNC].State << " " <<
++				DeviceStates.RenderState[D3DRENDERSTATE_ALPHABLENDENABLE].State << " " <<
++				DeviceStates.RenderState[D3DRENDERSTATE_SRCBLEND].State << " " <<
++				DeviceStates.RenderState[D3DRENDERSTATE_DESTBLEND].State << " " <<
++				DeviceStates.RenderState[D3DRENDERSTATE_ALPHATESTENABLE].State << " " <<
++				DeviceStates.RenderState[D3DRENDERSTATE_FOGENABLE].State;
++		}
++
++		DWORD& SamplesLogged = IsUI ? ToWorld.UISamplesLogged : ToWorld.WorldSamplesLogged;
++		if (SamplesLogged < 20)
++		{
++			SamplesLogged++;
++			Logging::Log() << __FUNCTION__ << " ToWorld sample " << (IsUI ? "UI" : "World") << " vcount=" << dwVertexCount <<
++				" z=[" << minZ << "," << maxZ << "] rhw=[" << minRHW << "," << maxRHW << "]";
++		}
++
++		if (IsUI)
++		{
++			ToWorld.UIDraws++;
++		}
++	}
++
++	ToWorld.Geometry.resize(targetStride * dwVertexCount);
++
++	const DirectX::XMMATRIX screenToWorld = DirectX::XMLoadFloat4x4(&ToWorld.ScreenToWorld);
++	const DirectX::XMMATRIX viewToWorld = DirectX::XMLoadFloat4x4(&ToWorld.ViewToWorld);
++	const BYTE* sourceVertex = (const BYTE*)lpVertices;
++	BYTE* targetVertex = ToWorld.Geometry.data();
++
++	for (DWORD x = 0; x < dwVertexCount; x++)
++	{
++		const float* srcpos = (const float*)sourceVertex;
++		float* trgtpos = (float*)targetVertex;
++
++		if (IsUI)
++		{
++			// Keep screen-space positions, drawn with the orthographic projection
++			trgtpos[0] = srcpos[0];
++			trgtpos[1] = srcpos[1];
++			trgtpos[2] = srcpos[2];
++		}
++		else if (IsSky || (Config.DdrawConvertHomogeneousToWorldUseRHW && std::isfinite(srcpos[3]) && fabsf(srcpos[3]) > 1e-8f))
++		{
++			// View-space position from screen position and true depth w = 1/rhw, then into world space.
++			// The sky uses one fixed depth near the far plane instead of its rhw.
++			const float w = IsSky ? Config.DdrawConvertHomogeneousToWorldFarPlane * 0.9f : 1.0f / srcpos[3];
++			const float ndcX = (srcpos[0] - ToWorld.ViewportX) * 2.0f / ToWorld.ViewportWidth - 1.0f;
++			const float ndcY = 1.0f - (srcpos[1] - ToWorld.ViewportY) * 2.0f / ToWorld.ViewportHeight;
++			const DirectX::XMVECTOR pos = DirectX::XMVector3TransformCoord(
++				DirectX::XMVectorSet(ndcX * w * ToWorld.TanHalfFovX, ndcY * w * ToWorld.TanHalfFovY, w, 1.0f), viewToWorld);
++
++			trgtpos[0] = DirectX::XMVectorGetX(pos);
++			trgtpos[1] = DirectX::XMVectorGetY(pos);
++			trgtpos[2] = DirectX::XMVectorGetZ(pos);
++			ToWorld.RHWConverted++;
++		}
++		else
++		{
++			const DirectX::XMVECTOR pos = DirectX::XMVector3TransformCoord(DirectX::XMVectorSet(srcpos[0], srcpos[1], srcpos[2], 1.0f), screenToWorld);
++
++			trgtpos[0] = DirectX::XMVectorGetX(pos);
++			trgtpos[1] = DirectX::XMVectorGetY(pos);
++			trgtpos[2] = DirectX::XMVectorGetZ(pos);
++			if (Config.DdrawConvertHomogeneousToWorldUseRHW)
++			{
++				ToWorld.RHWFallback++;
++			}
++		}
++
++		// Copy diffuse, specular and texture coordinates, dropping RHW
++		memcpy(targetVertex + sizeof(float) * 3, sourceVertex + sizeof(float) * 4, restSize);
++
++		sourceVertex += stride;
++		targetVertex += targetStride;
++	}
++
++	lpVertices = ToWorld.Geometry.data();
++	dwVertexTypeDesc = (dwVertexTypeDesc & ~D3DFVF_POSITION_MASK) | D3DFVF_XYZ;
++
++	// Keep the synthetic camera set for every converted draw, or the orthographic projection for UI draws
++	const D3DMATRIX Identity = { 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f };
++	ToWorld.CurrentProjection = IsUI ? &ToWorld.UIProjectionMatrix : &ToWorld.ProjectionMatrix;
++	ToWorld.LastDrawIsUI = IsUI;
++	ToWorld.LastDrawIsSky = IsSky;
++	if (!IsUI)
++	{
++		ToWorld.WorldDraws++;
++	}
++	(*d3d9Device)->SetTransform(D3DTS_WORLD, &Identity);
++	(*d3d9Device)->SetTransform(D3DTS_VIEW, IsUI ? &Identity : &ToWorld.ViewMatrix);
++	(*d3d9Device)->SetTransform(D3DTS_PROJECTION, ToWorld.CurrentProjection);
++
++	static bool Logged = false;
++	if (!Logged)
++	{
++		Logged = true;
++		Logging::Log() << __FUNCTION__ << " Converting XYZRHW to world space, stride " << stride << " -> " << targetStride;
++	}
++
++	return true;
++}
++
++void m_IDirect3DDeviceX::CaptureUIState(UISTATESNAPSHOT& State, DWORD VertexTypeDesc, DWORD Flags) const
++{
++	std::copy(std::begin(DeviceStates.RenderState), std::end(DeviceStates.RenderState), std::begin(State.RenderState));
++	std::copy(std::begin(DeviceStates.LightState), std::end(DeviceStates.LightState), std::begin(State.LightState));
++	for (UINT x = 0; x < D3DHAL_TSS_MAXSTAGES; x++)
++	{
++		std::copy(std::begin(DeviceStates.TextureStageState[x]), std::end(DeviceStates.TextureStageState[x]), std::begin(State.TextureStageState[x]));
++		std::copy(std::begin(DeviceStates.SamplerState[x]), std::end(DeviceStates.SamplerState[x]), std::begin(State.SamplerState[x]));
++		State.Texture[x] = CurrentTextureSurfaceX[x];
++		State.TextureColorKey[x] = CurrentTextureSurfaceX[x] && CurrentTextureSurfaceX[x]->IsColorKeyTexture();
++	}
++	State.View = DeviceStates.Viewport.View;
++	State.alphaOpSet = DeviceStates.alphaOpSet;
++	State.VertexTypeDesc = VertexTypeDesc;
++	State.Flags = Flags;
++}
++
++bool m_IDirect3DDeviceX::IsSameUIState(const UISTATESNAPSHOT& a, const UISTATESNAPSHOT& b)
++{
++	auto SameStates = [](const STATESTRUCT* x, const STATESTRUCT* y, size_t Count)
++	{
++		for (size_t i = 0; i < Count; i++)
++		{
++			if (x[i].Set != y[i].Set || x[i].State != y[i].State)
++			{
++				return false;
++			}
++		}
++		return true;
++	};
++
++	if (a.VertexTypeDesc != b.VertexTypeDesc || a.Flags != b.Flags || a.alphaOpSet != b.alphaOpSet ||
++		memcmp(&a.View, &b.View, sizeof(D3DVIEWPORT9)) != 0 ||
++		memcmp(a.LightState, b.LightState, sizeof(a.LightState)) != 0 ||
++		memcmp(a.Texture, b.Texture, sizeof(a.Texture)) != 0 ||
++		memcmp(a.TextureColorKey, b.TextureColorKey, sizeof(a.TextureColorKey)) != 0 ||
++		!SameStates(a.RenderState, b.RenderState, D3D_MAXRENDERSTATES))
++	{
++		return false;
++	}
++
++	for (UINT x = 0; x < D3DHAL_TSS_MAXSTAGES; x++)
++	{
++		if (!SameStates(a.TextureStageState[x], b.TextureStageState[x], MaxTextureStageStates) ||
++			!SameStates(a.SamplerState[x], b.SamplerState[x], D3DHAL_TEXTURESTATEBUF_SIZE))
++		{
++			return false;
++		}
++	}
++
++	return true;
++}
++
++ULONGLONG m_IDirect3DDeviceX::HashUIState(const UISTATESNAPSHOT& State)
++{
++	// FNV-1a over the fields compared by IsSameUIState (not over raw struct bytes, which include padding)
++	ULONGLONG Hash = 14695981039346656037ULL;
++	auto Add = [&Hash](ULONGLONG Value)
++	{
++		Hash ^= Value;
++		Hash *= 1099511628211ULL;
++	};
++	auto AddStates = [&Add](const STATESTRUCT* States, size_t Count)
++	{
++		for (size_t i = 0; i < Count; i++)
++		{
++			if (States[i].Set)
++			{
++				Add(((ULONGLONG)i << 32) | States[i].State);
++			}
++		}
++		Add(0xFFFFFFFFULL);
++	};
++
++	AddStates(State.RenderState, D3D_MAXRENDERSTATES);
++	for (UINT x = 0; x < D3DHAL_TSS_MAXSTAGES; x++)
++	{
++		AddStates(State.TextureStageState[x], MaxTextureStageStates);
++		AddStates(State.SamplerState[x], D3DHAL_TEXTURESTATEBUF_SIZE);
++		Add((ULONGLONG)(ULONG_PTR)State.Texture[x]);
++		Add(State.TextureColorKey[x]);
++	}
++	for (DWORD Light : State.LightState)
++	{
++		Add(Light);
++	}
++	Add(State.View.X); Add(State.View.Y); Add(State.View.Width); Add(State.View.Height);
++	Add(*(const DWORD*)&State.View.MinZ); Add(*(const DWORD*)&State.View.MaxZ);
++	Add(State.alphaOpSet);
++	Add(State.VertexTypeDesc);
++	Add(State.Flags);
++	return Hash;
++}
++
++m_IDirect3DDeviceX* m_IDirect3DDeviceX::UIStateBlockCacheOwner = nullptr;
++
++IDirect3DStateBlock9* m_IDirect3DDeviceX::CreateLeanUIStateBlock()
++{
++	// Applying a D3DSBT_ALL state block sets every device state, including all shader constants, transforms and
++	// all 8 texture stages, which RTX Remix has to process for every UI state change. Record only the
++	// fixed-function states UI drawing uses, with the values the device has right now.
++	static const D3DRENDERSTATETYPE RenderStates[] = {
++		D3DRS_ZENABLE, D3DRS_FILLMODE, D3DRS_SHADEMODE, D3DRS_ZWRITEENABLE, D3DRS_ALPHATESTENABLE, D3DRS_LASTPIXEL,
++		D3DRS_SRCBLEND, D3DRS_DESTBLEND, D3DRS_CULLMODE, D3DRS_ZFUNC, D3DRS_ALPHAREF, D3DRS_ALPHAFUNC, D3DRS_DITHERENABLE,
++		D3DRS_ALPHABLENDENABLE, D3DRS_FOGENABLE, D3DRS_SPECULARENABLE, D3DRS_FOGCOLOR, D3DRS_FOGTABLEMODE, D3DRS_FOGSTART,
++		D3DRS_FOGEND, D3DRS_FOGDENSITY, D3DRS_RANGEFOGENABLE, D3DRS_STENCILENABLE, D3DRS_STENCILFAIL, D3DRS_STENCILZFAIL,
++		D3DRS_STENCILPASS, D3DRS_STENCILFUNC, D3DRS_STENCILREF, D3DRS_STENCILMASK, D3DRS_STENCILWRITEMASK, D3DRS_TEXTUREFACTOR,
++		D3DRS_WRAP0, D3DRS_WRAP1, D3DRS_CLIPPING, D3DRS_LIGHTING, D3DRS_AMBIENT, D3DRS_FOGVERTEXMODE, D3DRS_COLORVERTEX,
++		D3DRS_LOCALVIEWER, D3DRS_NORMALIZENORMALS, D3DRS_DIFFUSEMATERIALSOURCE, D3DRS_SPECULARMATERIALSOURCE,
++		D3DRS_AMBIENTMATERIALSOURCE, D3DRS_EMISSIVEMATERIALSOURCE, D3DRS_VERTEXBLEND, D3DRS_CLIPPLANEENABLE,
++		D3DRS_COLORWRITEENABLE, D3DRS_BLENDOP, D3DRS_SCISSORTESTENABLE, D3DRS_SLOPESCALEDEPTHBIAS, D3DRS_DEPTHBIAS,
++		D3DRS_SEPARATEALPHABLENDENABLE, D3DRS_SRCBLENDALPHA, D3DRS_DESTBLENDALPHA, D3DRS_BLENDOPALPHA, D3DRS_SRGBWRITEENABLE };
++	static const D3DTEXTURESTAGESTATETYPE StageStates[] = {
++		D3DTSS_COLOROP, D3DTSS_COLORARG1, D3DTSS_COLORARG2, D3DTSS_ALPHAOP, D3DTSS_ALPHAARG1, D3DTSS_ALPHAARG2,
++		D3DTSS_TEXCOORDINDEX, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTSS_COLORARG0, D3DTSS_ALPHAARG0, D3DTSS_RESULTARG, D3DTSS_CONSTANT };
++	static const D3DSAMPLERSTATETYPE SamplerStates[] = {
++		D3DSAMP_ADDRESSU, D3DSAMP_ADDRESSV, D3DSAMP_ADDRESSW, D3DSAMP_BORDERCOLOR, D3DSAMP_MAGFILTER, D3DSAMP_MINFILTER,
++		D3DSAMP_MIPFILTER, D3DSAMP_MIPMAPLODBIAS, D3DSAMP_MAXMIPLEVEL, D3DSAMP_MAXANISOTROPY, D3DSAMP_SRGBTEXTURE };
++	static const D3DTRANSFORMSTATETYPE Transforms[] = { D3DTS_WORLD, D3DTS_VIEW, D3DTS_PROJECTION, D3DTS_TEXTURE0, D3DTS_TEXTURE1 };
++
++	LPDIRECT3DDEVICE9 pDevice = *d3d9Device;
++
++	// Read the current values first, Get calls are not allowed to see recorded values
++	DWORD RenderValues[_countof(RenderStates)] = {};
++	for (UINT i = 0; i < _countof(RenderStates); i++)
++	{
++		pDevice->GetRenderState(RenderStates[i], &RenderValues[i]);
++	}
++	IDirect3DBaseTexture9* pTextures[D3DHAL_TSS_MAXSTAGES] = {};
++	DWORD StageValues[D3DHAL_TSS_MAXSTAGES][_countof(StageStates)] = {};
++	DWORD SamplerValues[D3DHAL_TSS_MAXSTAGES][_countof(SamplerStates)] = {};
++	bool StageActive[D3DHAL_TSS_MAXSTAGES] = {};
++	bool PreviousStageActive = true;
++	for (UINT x = 0; x < D3DHAL_TSS_MAXSTAGES; x++)
++	{
++		pDevice->GetTexture(x, &pTextures[x]);
++		for (UINT i = 0; i < _countof(StageStates); i++)
++		{
++			pDevice->GetTextureStageState(x, StageStates[i], &StageValues[x][i]);
++		}
++		// Stages after the first disabled stage are not used by fixed-function blending
++		StageActive[x] = PreviousStageActive && StageValues[x][0] != D3DTOP_DISABLE;
++		PreviousStageActive = StageActive[x];
++		if (StageActive[x])
++		{
++			for (UINT i = 0; i < _countof(SamplerStates); i++)
++			{
++				pDevice->GetSamplerState(x, SamplerStates[i], &SamplerValues[x][i]);
++			}
++		}
++	}
++	D3DMATRIX Matrices[_countof(Transforms)] = {};
++	for (UINT i = 0; i < _countof(Transforms); i++)
++	{
++		pDevice->GetTransform(Transforms[i], &Matrices[i]);
++	}
++	DWORD FVF = 0;
++	pDevice->GetFVF(&FVF);
++	D3DVIEWPORT9 Viewport = {};
++	pDevice->GetViewport(&Viewport);
++	D3DMATERIAL9 Material = {};
++	pDevice->GetMaterial(&Material);
++	IDirect3DVertexShader9* pVertexShader = nullptr;
++	pDevice->GetVertexShader(&pVertexShader);
++	IDirect3DPixelShader9* pPixelShader = nullptr;
++	pDevice->GetPixelShader(&pPixelShader);
++
++	// Record them
++	IDirect3DStateBlock9* pStateBlock = nullptr;
++	if (SUCCEEDED(pDevice->BeginStateBlock()))
++	{
++		for (UINT i = 0; i < _countof(RenderStates); i++)
++		{
++			pDevice->SetRenderState(RenderStates[i], RenderValues[i]);
++		}
++		for (UINT x = 0; x < D3DHAL_TSS_MAXSTAGES; x++)
++		{
++			// The first inactive stage still needs its disable ops, so blending stops there
++			if (StageActive[x] || x == 0 || StageActive[x - 1])
++			{
++				pDevice->SetTexture(x, pTextures[x]);
++				for (UINT i = 0; i < _countof(StageStates); i++)
++				{
++					pDevice->SetTextureStageState(x, StageStates[i], StageValues[x][i]);
++				}
++			}
++			if (StageActive[x])
++			{
++				for (UINT i = 0; i < _countof(SamplerStates); i++)
++				{
++					pDevice->SetSamplerState(x, SamplerStates[i], SamplerValues[x][i]);
++				}
++			}
++		}
++		for (UINT i = 0; i < _countof(Transforms); i++)
++		{
++			pDevice->SetTransform(Transforms[i], &Matrices[i]);
++		}
++		pDevice->SetFVF(FVF);
++		pDevice->SetViewport(&Viewport);
++		pDevice->SetMaterial(&Material);
++		pDevice->SetVertexShader(pVertexShader);
++		pDevice->SetPixelShader(pPixelShader);
++
++		if (FAILED(pDevice->EndStateBlock(&pStateBlock)))
++		{
++			pStateBlock = nullptr;
++		}
++	}
++
++	for (IDirect3DBaseTexture9* pTexture : pTextures)
++	{
++		if (pTexture)
++		{
++			pTexture->Release();
++		}
++	}
++	if (pVertexShader)
++	{
++		pVertexShader->Release();
++	}
++	if (pPixelShader)
++	{
++		pPixelShader->Release();
++	}
++
++	if (pStateBlock)
++	{
++		ToWorld.LeanStateBlocks++;
++	}
++	else
++	{
++		ToWorld.LeanStateBlockFailures++;
++		LOG_LIMIT(10, __FUNCTION__ << " Warning: could not record lean UI state block, using D3DSBT_ALL");
++	}
++	return pStateBlock;
++}
++
++IDirect3DStateBlock9* m_IDirect3DDeviceX::FindCachedUIStateBlock(const UISTATESNAPSHOT& State, ULONGLONG Hash)
++{
++	// Drop the cache when the d3d9 device changed or any surface released its d3d9 textures
++	if (ToWorld.UIStateBlockCacheEntries &&
++		(ToWorld.UIStateBlockCacheDevice != *d3d9Device || ToWorld.UIStateBlockCacheGeneration != TPWTextureGeneration))
++	{
++		ClearUIStateBlockCache();
++	}
++
++	auto it = ToWorld.UIStateBlockCache.find(Hash);
++	if (it != ToWorld.UIStateBlockCache.end())
++	{
++		for (UISTATEBLOCKCACHEENTRY& Entry : it->second)
++		{
++			if (IsSameUIState(State, Entry.State))
++			{
++				Entry.StateBlock->AddRef();
++				return Entry.StateBlock;
++			}
++		}
++	}
++	return nullptr;
++}
++
++void m_IDirect3DDeviceX::AddCachedUIStateBlock(const UISTATESNAPSHOT& State, ULONGLONG Hash, IDirect3DStateBlock9* pStateBlock)
++{
++	// Keep the cache bounded, the game normally uses a few hundred UI states
++	const size_t MaxEntries = 2048;
++	if (ToWorld.UIStateBlockCacheEntries >= MaxEntries)
++	{
++		ClearUIStateBlockCache();
++	}
++
++	if (!ToWorld.UIStateBlockCacheEntries)
++	{
++		ToWorld.UIStateBlockCacheDevice = *d3d9Device;
++		ToWorld.UIStateBlockCacheGeneration = TPWTextureGeneration;
++	}
++
++	UISTATEBLOCKCACHEENTRY Entry;
++	Entry.State = State;
++	Entry.StateBlock = pStateBlock;
++	pStateBlock->AddRef();
++	ToWorld.UIStateBlockCache[Hash].push_back(Entry);
++	ToWorld.UIStateBlockCacheEntries++;
++	UIStateBlockCacheOwner = this;
++}
++
++void m_IDirect3DDeviceX::ClearUIStateBlockCache()
++{
++	if (ToWorld.UIStateBlockCacheEntries)
++	{
++		ToWorld.StateBlockCacheClears++;
++	}
++	for (auto& Bucket : ToWorld.UIStateBlockCache)
++	{
++		for (UISTATEBLOCKCACHEENTRY& Entry : Bucket.second)
++		{
++			if (Entry.StateBlock)
++			{
++				Entry.StateBlock->Release();
++			}
++		}
++	}
++	ToWorld.UIStateBlockCache.clear();
++	ToWorld.UIStateBlockCacheEntries = 0;
++	ToWorld.UIStateBlockCacheDevice = nullptr;
++	if (UIStateBlockCacheOwner == this)
++	{
++		UIStateBlockCacheOwner = nullptr;
++	}
++}
++
++void m_IDirect3DDeviceX::ReleaseUIStateBlockCaches()
++{
++	// Queued draws hold state blocks too, they would be dropped at the next scene anyway
++	if (UIQueueOwner)
++	{
++		UIQueueOwner->ClearUIQueue();
++	}
++	if (UIStateBlockCacheOwner)
++	{
++		UIStateBlockCacheOwner->ClearUIStateBlockCache();
++	}
++}
++
++void m_IDirect3DDeviceX::TPWRecordDrawDiag(const char* Func, D3DPRIMITIVETYPE PrimitiveType, DWORD VertexTypeDesc, LPVOID lpVertices, DWORD VertexCount, DWORD IndexCount)
++{
++	if (!Config.DdrawConvertHomogeneousDiagnostics)
++	{
++		return;
++	}
++	TPWDrawDiagByType[(DWORD)PrimitiveType < 8 ? (DWORD)PrimitiveType : 0]++;
++
++	// Lines, points and additive blending (destination blend one), the usual ways to draw lightning and flashes
++	const DWORD AlphaBlend = DeviceStates.RenderState[D3DRENDERSTATE_ALPHABLENDENABLE].State;
++	const DWORD SrcBlend = DeviceStates.RenderState[D3DRENDERSTATE_SRCBLEND].State;
++	const DWORD DestBlend = DeviceStates.RenderState[D3DRENDERSTATE_DESTBLEND].State;
++	const bool IsLineOrPoint = (PrimitiveType == D3DPT_POINTLIST || PrimitiveType == D3DPT_LINELIST || PrimitiveType == D3DPT_LINESTRIP);
++	const bool IsAdditive = AlphaBlend && DestBlend == D3DBLEND_ONE;
++	if (!IsLineOrPoint && !IsAdditive)
++	{
++		return;
++	}
++
++	TPWDRAWDIAGKEY Key = { Func, (DWORD)PrimitiveType, VertexTypeDesc, AlphaBlend, SrcBlend, DestBlend,
++		DeviceStates.RenderState[D3DRENDERSTATE_ZWRITEENABLE].State, (void*)CurrentTextureSurfaceX[0] };
++	TPWDRAWDIAGSTATS& Stats = TPWDrawDiag[Key];
++	Stats.Draws++;
++	Stats.Vertices += VertexCount;
++
++	// Save each texture once so the draw groups can be matched to the game's image files
++	if (CurrentTextureSurfaceX[0] && TPWDrawDiagDumped.size() < 100 && TPWDrawDiagDumped.insert((void*)CurrentTextureSurfaceX[0]).second)
++	{
++		char Path[MAX_PATH] = {};
++		GetModuleFileNameA(nullptr, Path, MAX_PATH);
++		char* Slash = strrchr(Path, '\\');
++		if (Slash)
++		{
++			*(Slash + 1) = '\0';
++			strcat_s(Path, "tpw-texdump");
++			CreateDirectoryA(Path, nullptr);
++			char File[MAX_PATH];
++			sprintf_s(File, "%s\\tex_%p_%u.bmp", Path, (void*)CurrentTextureSurfaceX[0], (UINT)TPWDrawDiagDumped.size());
++			CurrentTextureSurfaceX[0]->TPWDumpTextureToBMP(File);
++		}
++	}
++
++	// Screen bounds of pre-transformed vertices
++	const bool IsRHW = (VertexTypeDesc & D3DFVF_POSITION_MASK) == D3DFVF_XYZRHW;
++	const UINT Stride = GetVertexStride(VertexTypeDesc);
++	if (lpVertices && Stride >= sizeof(float) * 3)
++	{
++		const BYTE* v = (const BYTE*)lpVertices;
++		for (DWORD x = 0; x < VertexCount; x++, v += Stride)
++		{
++			const float* p = (const float*)v;
++			Stats.MinX = min(Stats.MinX, p[0]); Stats.MaxX = max(Stats.MaxX, p[0]);
++			Stats.MinY = min(Stats.MinY, p[1]); Stats.MaxY = max(Stats.MaxY, p[1]);
++			Stats.MinZ = min(Stats.MinZ, p[2]); Stats.MaxZ = max(Stats.MaxZ, p[2]);
++			if (IsRHW)
++			{
++				Stats.MinRHW = min(Stats.MinRHW, p[3]); Stats.MaxRHW = max(Stats.MaxRHW, p[3]);
++			}
++		}
++
++		// A few raw samples of each kind
++		if (Stats.Samples < 2 && TPWDrawDiagSamples < 200)
++		{
++			Stats.Samples++;
++			TPWDrawDiagSamples++;
++			std::string Line;
++			const BYTE* s = (const BYTE*)lpVertices;
++			for (DWORD x = 0; x < VertexCount && x < 4; x++, s += Stride)
++			{
++				const float* p = (const float*)s;
++				char Buf[160];
++				sprintf_s(Buf, " [%.1f %.1f %.4f %.4f", p[0], p[1], p[2], IsRHW ? p[3] : 0.0f);
++				Line += Buf;
++				if (VertexTypeDesc & D3DFVF_DIFFUSE)
++				{
++					const DWORD Diffuse = *(const DWORD*)(s + sizeof(float) * (IsRHW ? 4 : 3) + ((VertexTypeDesc & D3DFVF_NORMAL) ? sizeof(float) * 3 : 0));
++					sprintf_s(Buf, " c=%08X", Diffuse);
++					Line += Buf;
++				}
++				Line += "]";
++			}
++			Logging::Log() << __FUNCTION__ << " TPW draw sample " << Func << " type=" << PrimitiveType << " fvf=" << Logging::hex(VertexTypeDesc) <<
++				" v=" << VertexCount << " i=" << IndexCount << " blend=" << AlphaBlend << " " << SrcBlend << "/" << DestBlend <<
++				" zwrite=" << Key.ZWrite << " tex=" << Key.Texture << " in scene=" << IsInScene << Line.c_str();
++		}
++	}
++}
++
++void m_IDirect3DDeviceX::TPWLogDrawDiag()
++{
++	if (!Config.DdrawConvertHomogeneousDiagnostics)
++	{
++		return;
++	}
++	Logging::Log() << __FUNCTION__ << " TPW draws by type (1 point, 2 line list, 3 line strip, 4 tri list, 5 tri strip, 6 fan):" <<
++		" 1=" << TPWDrawDiagByType[1] << " 2=" << TPWDrawDiagByType[2] << " 3=" << TPWDrawDiagByType[3] <<
++		" 4=" << TPWDrawDiagByType[4] << " 5=" << TPWDrawDiagByType[5] << " 6=" << TPWDrawDiagByType[6] << " unusual kinds=" << TPWDrawDiag.size();
++	std::vector<std::pair<TPWDRAWDIAGKEY, TPWDRAWDIAGSTATS>> Sorted(TPWDrawDiag.begin(), TPWDrawDiag.end());
++	std::sort(Sorted.begin(), Sorted.end(), [](const auto& a, const auto& b) { return a.second.Draws > b.second.Draws; });
++	for (size_t i = 0; i < Sorted.size() && i < 12; i++)
++	{
++		const TPWDRAWDIAGKEY& k = Sorted[i].first;
++		const TPWDRAWDIAGSTATS& s = Sorted[i].second;
++		Logging::Log() << __FUNCTION__ << "   " << k.Func << " type=" << k.PrimitiveType << " fvf=" << Logging::hex(k.VertexTypeDesc) <<
++			" blend=" << k.AlphaBlend << " " << k.SrcBlend << "/" << k.DestBlend << " zwrite=" << k.ZWrite << " tex=" << k.Texture <<
++			" draws=" << s.Draws << " verts=" << s.Vertices << " x[" << s.MinX << "," << s.MaxX << "] y[" << s.MinY << "," << s.MaxY <<
++			"] z[" << s.MinZ << "," << s.MaxZ << "] rhw[" << s.MinRHW << "," << s.MaxRHW << "]";
++	}
++	TPWDrawDiag.clear();
++	ZeroMemory(TPWDrawDiagByType, sizeof(TPWDrawDiagByType));
++}
++
++void m_IDirect3DDeviceX::OnSurfaceTextureReleased()
++{
++	// A surface is about to release its d3d9 textures. Queued and cached UI state blocks may hold them,
++	// and applying such a block later would bind a texture whose wrapper no longer exists. Draw the
++	// queued UI while its textures are still valid, then drop every cached state block.
++	ScopedCriticalSection ThreadLockDD(DdrawWrapper::GetDDCriticalSection());
++
++	if (UIQueueOwner && !UIQueueOwner->ToWorld.UIQueue.empty())
++	{
++		if (UIQueueOwner->IsInScene)
++		{
++			UIQueueOwner->ReplayUIDraws();
++		}
++		else
++		{
++			UIQueueOwner->ClearUIQueue();
++		}
++	}
++	if (UIStateBlockCacheOwner)
++	{
++		UIStateBlockCacheOwner->ClearUIStateBlockCache();
++	}
++}
++
++bool m_IDirect3DDeviceX::QueueUIDraw(D3DPRIMITIVETYPE PrimitiveType, UINT PrimitiveCount, LPVOID lpVertices, UINT VertexCount, UINT Stride, DWORD VertexTypeDesc, DWORD Flags, LPWORD lpwIndices, UINT IndexCount)
++{
++	// Draws with the same game state as the previous queued UI draw share its state block
++	UISTATESNAPSHOT CurrentState;
++	CaptureUIState(CurrentState, VertexTypeDesc, Flags);
++	const bool SameState = !ToWorld.UIQueue.empty() && ToWorld.LastUIStateValid && IsSameUIState(CurrentState, ToWorld.LastUIState);
++
++	if (SameState)
++	{
++		// Merge consecutive triangle lists into one indexed draw
++		QUEUEDUIDRAW& Last = ToWorld.UIQueue.back();
++		if (PrimitiveType == D3DPT_TRIANGLELIST && Last.PrimitiveType == D3DPT_TRIANGLELIST && Last.Stride == Stride &&
++			Last.VertexCount + VertexCount <= 0xFFFF)
++		{
++			if (Last.Indices.empty())
++			{
++				for (UINT i = 0; i < Last.VertexCount; i++)
++				{
++					Last.Indices.push_back((WORD)i);
++				}
++			}
++
++			const WORD Base = (WORD)Last.VertexCount;
++			if (lpwIndices)
++			{
++				for (UINT i = 0; i < IndexCount; i++)
++				{
++					Last.Indices.push_back((WORD)(lpwIndices[i] + Base));
++				}
++			}
++			else
++			{
++				for (UINT i = 0; i < VertexCount; i++)
++				{
++					Last.Indices.push_back((WORD)(i + Base));
++				}
++			}
++
++			Last.Vertices.insert(Last.Vertices.end(), (const BYTE*)lpVertices, (const BYTE*)lpVertices + VertexCount * Stride);
++			Last.VertexCount += VertexCount;
++			Last.PrimitiveCount = (UINT)Last.Indices.size() / 3;
++			Last.SourceDraws++;
++
++			ToWorld.UIQueued++;
++			ToWorld.UIDrawsMerged++;
++			return true;
++		}
++	}
++
++	// Capture the complete device state of this draw (textures, render, texture stage and sampler states, FVF and transforms)
++	IDirect3DStateBlock9* pStateBlock = nullptr;
++	if (SameState)
++	{
++		pStateBlock = ToWorld.UIQueue.back().StateBlock;
++		pStateBlock->AddRef();
++	}
++	else
++	{
++		// Reuse the state block of an identical UI state from an earlier scene
++		const LONGLONG CreateStart = QpcNow();
++		const ULONGLONG Hash = HashUIState(CurrentState);
++		pStateBlock = FindCachedUIStateBlock(CurrentState, Hash);
++		if (pStateBlock)
++		{
++			ToWorld.StateBlocksReused++;
++		}
++		else
++		{
++			if (Config.DdrawConvertHomogeneousLeanUIStateBlocks)
++			{
++				pStateBlock = CreateLeanUIStateBlock();
++			}
++			const HRESULT hrCreate = pStateBlock ? D3D_OK : (*d3d9Device)->CreateStateBlock(D3DSBT_ALL, &pStateBlock);
++			if (FAILED(hrCreate) || !pStateBlock)
++			{
++				ToWorld.TimeCreateStateBlock += QpcNow() - CreateStart;
++				ToWorld.UIReplayFailed++;
++				return false;
++			}
++			ToWorld.StateBlocksCreated++;
++			AddCachedUIStateBlock(CurrentState, Hash, pStateBlock);
++		}
++		ToWorld.TimeCreateStateBlock += QpcNow() - CreateStart;
++		ToWorld.LastUIState = CurrentState;
++		ToWorld.LastUIStateValid = true;
++	}
++
++	QUEUEDUIDRAW Draw;
++	Draw.StateBlock = pStateBlock;
++	Draw.Vertices.assign((const BYTE*)lpVertices, (const BYTE*)lpVertices + VertexCount * Stride);
++	if (lpwIndices)
++	{
++		Draw.Indices.assign(lpwIndices, lpwIndices + IndexCount);
++	}
++	Draw.PrimitiveType = PrimitiveType;
++	Draw.PrimitiveCount = PrimitiveCount;
++	Draw.VertexCount = VertexCount;
++	Draw.Stride = Stride;
++
++	ToWorld.UIQueue.push_back(std::move(Draw));
++	ToWorld.UIQueued++;
++
++	// Remember the textures used, so the queue can be flushed before the game overwrites one of them
++	for (m_IDirectDrawSurfaceX* pTexture : CurrentTextureSurfaceX)
++	{
++		if (pTexture && std::find(ToWorld.UIQueueTextures.begin(), ToWorld.UIQueueTextures.end(), pTexture) == ToWorld.UIQueueTextures.end())
++		{
++			ToWorld.UIQueueTextures.push_back(pTexture);
++		}
++	}
++	UIQueueOwner = this;
++	ToWorld.QueueThreadId = GetCurrentThreadId();
++
++	return true;
++}
++
++m_IDirect3DDeviceX* m_IDirect3DDeviceX::UIQueueOwner = nullptr;
++
++void m_IDirect3DDeviceX::FlushUIQueueBeforeTextureWrite(m_IDirectDrawSurfaceX* pSurface)
++{
++	if (!UIQueueOwner || !pSurface)
++	{
++		return;
++	}
++
++	// The game writes textures from a second thread, and this is called before the surface takes any lock,
++	// so serialize with draws, queueing and replay, which all run under the DirectDraw critical section
++	ScopedCriticalSection ThreadLockDD(DdrawWrapper::GetDDCriticalSection());
++
++	m_IDirect3DDeviceX* pDevice = UIQueueOwner;
++	if (!pDevice || pDevice->ToWorld.UIQueue.empty())
++	{
++		return;
++	}
++
++	const auto& Textures = pDevice->ToWorld.UIQueueTextures;
++	if (std::find(Textures.begin(), Textures.end(), pSurface) == Textures.end())
++	{
++		return;
++	}
++
++	// Queued draws can only be submitted inside a scene
++	if (!pDevice->IsInScene)
++	{
++		pDevice->ToWorld.FlushesSkipped++;
++		return;
++	}
++
++	// Draw the queued UI while the texture still holds the content it was queued with
++	pDevice->ToWorld.TextureFlushes++;
++	if (GetCurrentThreadId() != pDevice->ToWorld.QueueThreadId)
++	{
++		pDevice->ToWorld.TextureFlushesOtherThread++;
++	}
++	pDevice->ToWorld.SceneFlushWorldMarks.push_back(pDevice->ToWorld.WorldDraws);
++	pDevice->ReplayUIDraws();
++}
++
++void m_IDirect3DDeviceX::ReplayUIDraws()
++{
++	if (ToWorld.UIQueue.empty())
++	{
++		return;
++	}
++
++	const LONGLONG ReplayStart = QpcNow();
++
++	// All world draws counted so far were submitted before this replay
++	ToWorld.WorldDrawsBeforeReplay = ToWorld.WorldDraws;
++
++	// Save the current device state so it can be restored after the replay
++	IDirect3DStateBlock9* pRestoreBlock = nullptr;
++	LONGLONG TimerStart = QpcNow();
++	if (FAILED((*d3d9Device)->CreateStateBlock(D3DSBT_ALL, &pRestoreBlock)))
++	{
++		pRestoreBlock = nullptr;
++		LOG_LIMIT(10, __FUNCTION__ << " Warning: could not save device state before UI replay!");
++	}
++	ToWorld.TimeRestoreBlock += QpcNow() - TimerStart;
++
++	// RTX Remix detects UI from the first orthographic draw without z writes and rasterizes everything after it.
++	// Trigger that with one off-screen triangle, so the queued UI keeps the game's own z states and draw order.
++	{
++		const QUEUEDUIDRAW& First = ToWorld.UIQueue.front();
++		TimerStart = QpcNow();
++		const bool FirstApplied = First.Stride >= sizeof(float) * 3 && SUCCEEDED(First.StateBlock->Apply());
++		ToWorld.TimeApplyStateBlock += QpcNow() - TimerStart;
++		ToWorld.ApplyCount++;
++		if (FirstApplied)
++		{
++			TimerStart = QpcNow();
++			std::vector<BYTE> Triangle(First.Stride * 3, 0);
++			const float Positions[3][3] = { { -100.0f, -100.0f, 0.0f }, { -90.0f, -100.0f, 0.0f }, { -100.0f, -90.0f, 0.0f } };
++			for (UINT i = 0; i < 3; i++)
++			{
++				memcpy(Triangle.data() + i * First.Stride, Positions[i], sizeof(Positions[i]));
++			}
++			(*d3d9Device)->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
++			if (SUCCEEDED((*d3d9Device)->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, Triangle.data(), First.Stride)))
++			{
++				ToWorld.UITriggerDraws++;
++			}
++			ToWorld.TimeUIDraws += QpcNow() - TimerStart;
++		}
++	}
++
++	IDirect3DStateBlock9* pAppliedBlock = nullptr;	// The first entry is applied again below to restore its z states
++	for (QUEUEDUIDRAW& Draw : ToWorld.UIQueue)
++	{
++		// Consecutive entries that share a state block only need it applied once
++		HRESULT hr = D3D_OK;
++		if (Draw.StateBlock != pAppliedBlock)
++		{
++			TimerStart = QpcNow();
++			hr = Draw.StateBlock->Apply();
++			ToWorld.TimeApplyStateBlock += QpcNow() - TimerStart;
++			ToWorld.ApplyCount++;
++			pAppliedBlock = SUCCEEDED(hr) ? Draw.StateBlock : nullptr;
++		}
++		if (SUCCEEDED(hr))
++		{
++			TimerStart = QpcNow();
++			hr = Draw.Indices.empty() ?
++				(*d3d9Device)->DrawPrimitiveUP(Draw.PrimitiveType, Draw.PrimitiveCount, Draw.Vertices.data(), Draw.Stride) :
++				(*d3d9Device)->DrawIndexedPrimitiveUP(Draw.PrimitiveType, 0, Draw.VertexCount, Draw.PrimitiveCount, Draw.Indices.data(), D3DFMT_INDEX16, Draw.Vertices.data(), Draw.Stride);
++			ToWorld.TimeUIDraws += QpcNow() - TimerStart;
++			ToWorld.UIReplayDrawCalls++;
++		}
++
++		if (SUCCEEDED(hr))
++		{
++			ToWorld.UIReplayed += Draw.SourceDraws;
++		}
++		else
++		{
++			ToWorld.UIReplayFailed += Draw.SourceDraws;
++			LOG_LIMIT(10, __FUNCTION__ << " Error: UI replay failed: " << (D3DERR)hr);
++		}
++	}
++
++	if (pRestoreBlock)
++	{
++		TimerStart = QpcNow();
++		pRestoreBlock->Apply();
++		pRestoreBlock->Release();
++		ToWorld.TimeRestoreBlock += QpcNow() - TimerStart;
++	}
++
++	ClearUIQueue();
++	ToWorld.TimeReplay += QpcNow() - ReplayStart;
++}
++
++void m_IDirect3DDeviceX::ClearUIQueue()
++{
++	for (QUEUEDUIDRAW& Draw : ToWorld.UIQueue)
++	{
++		if (Draw.StateBlock)
++		{
++			Draw.StateBlock->Release();
++		}
++	}
++	ToWorld.UIQueue.clear();
++	ToWorld.UIQueueTextures.clear();
++	ToWorld.LastUIStateValid = false;
++	if (UIQueueOwner == this)
++	{
++		UIQueueOwner = nullptr;
++	}
++}
++
+ inline HRESULT m_IDirect3DDeviceX::SetVertexType(DWORD dwVertexTypeDesc, DWORD& dwFlags)
+ {
+ 	// Handle D3DFVF_LVERTEX and other types with D3DFVF_RESERVED1 in it
+diff --git a/ddraw/IDirect3DDeviceX.h b/ddraw/IDirect3DDeviceX.h
+index 888de2c6..faff9c36 100644
+--- a/ddraw/IDirect3DDeviceX.h
++++ b/ddraw/IDirect3DDeviceX.h
+@@ -1,5 +1,51 @@
+ #pragma once
+ 
++// TPW diagnostics and UI state block cache support shared with surfaces
++enum TPWSURFACETIMINGTYPE { TPW_TIME_LOCK, TPW_TIME_UNLOCK, TPW_TIME_BLT, TPW_TIME_BLTFAST, TPW_TIME_FLIP, TPW_TIME_COUNT };
++struct TPWSURFACETIMING {
++	volatile LONGLONG Ticks[TPW_TIME_COUNT] = {};
++	volatile LONG Count[TPW_TIME_COUNT] = {};
++	volatile LONG OtherThreadCount[TPW_TIME_COUNT] = {};
++};
++extern TPWSURFACETIMING TPWSurfaceTiming;
++extern volatile LONG TPWTextureGeneration;	// Changes whenever a surface releases its d3d9 textures
++extern DWORD TPWRenderThreadId;
++void TPWReleaseReadbackSurfaces();	// Small render target readback surfaces, released before the d3d9 device releases or resets its resources
++
++// Times one surface call, nested calls on the same thread are only counted once
++class TPWScopedSurfaceTimer {
++	TPWSURFACETIMINGTYPE Type;
++	LONGLONG Start = 0;
++	bool IsOuter = false;
++	static thread_local LONG Depth;
++public:
++	explicit TPWScopedSurfaceTimer(TPWSURFACETIMINGTYPE t) : Type(t)
++	{
++		IsOuter = (Depth++ == 0);
++		if (IsOuter)
++		{
++			LARGE_INTEGER Now;
++			QueryPerformanceCounter(&Now);
++			Start = Now.QuadPart;
++		}
++	}
++	~TPWScopedSurfaceTimer()
++	{
++		Depth--;
++		if (IsOuter)
++		{
++			LARGE_INTEGER Now;
++			QueryPerformanceCounter(&Now);
++			InterlockedAdd64(&TPWSurfaceTiming.Ticks[Type], Now.QuadPart - Start);
++			InterlockedIncrement(&TPWSurfaceTiming.Count[Type]);
++			if (TPWRenderThreadId && GetCurrentThreadId() != TPWRenderThreadId)
++			{
++				InterlockedIncrement(&TPWSurfaceTiming.OtherThreadCount[Type]);
++			}
++		}
++	}
++};
++
+ class m_IDirect3DDeviceX final : public IUnknown, public AddressLookupTableDdrawObject
+ {
+ private:
+@@ -324,8 +370,138 @@ private:
+ 	// Viewport array
+ 	std::vector<LPDIRECT3DVIEWPORT3> AttachedViewports;
+ 
++	// UI draw queued until the end of the scene, so RTX Remix sees all world geometry before the first UI draw
++	// Game-level state a queued UI draw depends on, used to share state blocks between draws with identical state
++	struct UISTATESNAPSHOT {
++		STATESTRUCT RenderState[D3D_MAXRENDERSTATES];
++		DWORD LightState[MaxLightStates] = {};
++		STATESTRUCT TextureStageState[D3DHAL_TSS_MAXSTAGES][MaxTextureStageStates];
++		STATESTRUCT SamplerState[D3DHAL_TSS_MAXSTAGES][D3DHAL_TEXTURESTATEBUF_SIZE];
++		D3DVIEWPORT9 View = {};
++		bool alphaOpSet = false;
++		m_IDirectDrawSurfaceX* Texture[D3DHAL_TSS_MAXSTAGES] = {};
++		bool TextureColorKey[D3DHAL_TSS_MAXSTAGES] = {};
++		DWORD VertexTypeDesc = 0;
++		DWORD Flags = 0;
++	};
++
++	// UI state blocks kept across scenes, the game draws the same UI states every scene
++	struct UISTATEBLOCKCACHEENTRY {
++		UISTATESNAPSHOT State;
++		IDirect3DStateBlock9* StateBlock = nullptr;
++	};
++
++	struct QUEUEDUIDRAW {
++		IDirect3DStateBlock9* StateBlock = nullptr;
++		std::vector<BYTE> Vertices;
++		std::vector<WORD> Indices;
++		D3DPRIMITIVETYPE PrimitiveType = D3DPT_TRIANGLELIST;
++		UINT PrimitiveCount = 0;
++		UINT VertexCount = 0;
++		UINT Stride = 0;
++		UINT SourceDraws = 1;	// Original game draws merged into this entry
++	};
++
++	// XYZRHW to world conversion for RTX Remix (ported from the DK2 RTX Remix fork)
++	struct {
++		std::vector<QUEUEDUIDRAW> UIQueue;
++		UISTATESNAPSHOT LastUIState;
++		bool LastUIStateValid = false;
++		DWORD StateBlocksCreated = 0;
++		std::unordered_map<ULONGLONG, std::vector<UISTATEBLOCKCACHEENTRY>> UIStateBlockCache;
++		size_t UIStateBlockCacheEntries = 0;
++		LONG UIStateBlockCacheGeneration = 0;
++		LPDIRECT3DDEVICE9 UIStateBlockCacheDevice = nullptr;
++		DWORD StateBlocksReused = 0;
++		DWORD LeanStateBlocks = 0;
++		DWORD LeanStateBlockFailures = 0;
++		DWORD StateBlockCacheClears = 0;
++		DWORD UIDrawsMerged = 0;
++		DWORD UIReplayDrawCalls = 0;
++		DWORD UITriggerDraws = 0;
++		DWORD LastStatsSceneCount = 0;
++		// Timing diagnostics (QueryPerformanceCounter ticks, reset every stats interval)
++		LONGLONG TimeCreateStateBlock = 0;	// CreateStateBlock for queued UI draws
++		LONGLONG TimeApplyStateBlock = 0;	// Apply of UI state blocks during replay
++		LONGLONG TimeUIDraws = 0;			// UI replay draw calls (incl. trigger draw)
++		LONGLONG TimeRestoreBlock = 0;		// Create and apply of the restore block
++		LONGLONG TimeReplay = 0;			// Whole ReplayUIDraws
++		LONGLONG TimeInScene = 0;			// BeginScene to EndScene
++		LONGLONG TimePresent = 0;			// d3d9 EndScene and present after it
++		LONGLONG SceneStartTime = 0;
++		DWORD ApplyCount = 0;
++		std::vector<m_IDirectDrawSurfaceX*> UIQueueTextures;	// Textures used by queued UI draws
++		std::vector<DWORD> SceneFlushWorldMarks;				// World draw count at each texture-triggered flush in this scene
++		DWORD UIQueued = 0;
++		DWORD UIReplayed = 0;
++		DWORD UIReplayFailed = 0;
++		DWORD TextureFlushes = 0;
++		DWORD TextureFlushesOtherThread = 0;
++		DWORD FlushesSkipped = 0;
++		DWORD FlushesBeforeFinal3D = 0;
++		DWORD QueueThreadId = 0;
++		DWORD LastStatsTick = 0;
++		DWORD WorldDraws = 0;
++		DWORD WorldDrawsBeforeReplay = 0;
++		bool IsValid = false;
++		D3DMATRIX ViewMatrix = {};
++		D3DMATRIX ProjectionMatrix = {};
++		D3DMATRIX UIProjectionMatrix = {};
++		const D3DMATRIX* CurrentProjection = nullptr;
++		bool LastDrawIsUI = false;
++		bool LastDrawIsSky = false;
++		DWORD SkyDraws = 0;
++		DirectX::XMFLOAT4X4 ScreenToWorld = {};
++		DirectX::XMFLOAT4X4 ViewToWorld = {};		// Inverse of the synthetic view matrix
++		float ViewportX = 0.0f, ViewportY = 0.0f, ViewportWidth = 0.0f, ViewportHeight = 0.0f;
++		float TanHalfFovX = 0.0f, TanHalfFovY = 0.0f;
++		DWORD RHWConverted = 0;
++		DWORD RHWFallback = 0;
++		std::vector<BYTE> Geometry;
++		DWORD ConvertedDraws = 0;
++		DWORD ConvertedIndexedDraws = 0;
++		DWORD UIDraws = 0;
++		DWORD UISamplesLogged = 0;
++		DWORD WorldSamplesLogged = 0;
++		bool DumpThisScene = false;
++		DWORD DumpCount = 0;
++		DWORD DumpLines = 0;
++		DWORD SceneDrawIndex = 0;
++		DWORD SceneCount = 0;
++	} ToWorld;
++
+ 	// Helper functions
+ 	inline HRESULT CheckInterface(char* FunctionName, bool CheckD3DDevice);
++	void UpdateToWorldMatrices();
++	bool ConvertHomogeneousToWorld(DWORD& dwVertexTypeDesc, LPVOID& lpVertices, DWORD dwVertexCount, DWORD dwIndexCount = 0);
++	bool QueueUIDraw(D3DPRIMITIVETYPE PrimitiveType, UINT PrimitiveCount, LPVOID lpVertices, UINT VertexCount, UINT Stride, DWORD VertexTypeDesc, DWORD Flags, LPWORD lpwIndices = nullptr, UINT IndexCount = 0);
++	void CaptureUIState(UISTATESNAPSHOT& State, DWORD VertexTypeDesc, DWORD Flags) const;
++	static bool IsSameUIState(const UISTATESNAPSHOT& a, const UISTATESNAPSHOT& b);
++	static ULONGLONG HashUIState(const UISTATESNAPSHOT& State);
++	IDirect3DStateBlock9* FindCachedUIStateBlock(const UISTATESNAPSHOT& State, ULONGLONG Hash);
++	IDirect3DStateBlock9* CreateLeanUIStateBlock();
++	void AddCachedUIStateBlock(const UISTATESNAPSHOT& State, ULONGLONG Hash, IDirect3DStateBlock9* pStateBlock);
++	void ClearUIStateBlockCache();
++	static m_IDirect3DDeviceX* UIStateBlockCacheOwner;
++	// TPW draw diagnostics: lines, points and additive blended draws (lightning hunt)
++	void TPWRecordDrawDiag(const char* Func, D3DPRIMITIVETYPE PrimitiveType, DWORD VertexTypeDesc, LPVOID lpVertices, DWORD VertexCount, DWORD IndexCount);
++	static void TPWLogDrawDiag();
++public:
++	// Cached state blocks hold texture references, so they must be released before the d3d9 device releases or resets its resources
++	static void ReleaseUIStateBlockCaches();
++	// Called before a surface releases its d3d9 textures
++	static void OnSurfaceTextureReleased();
++private:
++	void ReplayUIDraws();
++	void ClearUIQueue();
++
++	// Device that currently holds queued UI draws, used to flush them before a referenced texture is overwritten
++	static m_IDirect3DDeviceX* UIQueueOwner;
++
++public:
++	static void FlushUIQueueBeforeTextureWrite(m_IDirectDrawSurfaceX* pSurface);
++
++private:
+ 	inline HRESULT GetReturnResult(HRESULT hr);
+ 
+ 	// Execute buffer function
+diff --git a/ddraw/IDirectDrawSurfaceX.cpp b/ddraw/IDirectDrawSurfaceX.cpp
+index 628f582a..b478a47e 100644
+--- a/ddraw/IDirectDrawSurfaceX.cpp
++++ b/ddraw/IDirectDrawSurfaceX.cpp
+@@ -461,8 +461,104 @@ HRESULT m_IDirectDrawSurfaceX::AddOverlayDirtyRect(LPRECT lpRect)
+ 	return ProxyInterface->AddOverlayDirtyRect(lpRect);
+ }
+ 
+-HRESULT m_IDirectDrawSurfaceX::Blt(LPRECT lpDestRect, LPDIRECTDRAWSURFACE7 lpDDSrcSurface, LPRECT lpSrcRect, DWORD dwFlags, LPDDBLTFX lpDDBltFx, DWORD MipMapLevel, bool SyncSurfaces, bool PresentBlt)
++// TPW: small render target readback (see BltFast)
++namespace {
++	constexpr LONG TPWReadbackSize = 64;
++	struct {
++		LPDIRECT3DSURFACE9 RenderTarget = nullptr;	// Default pool, must be released before a device reset
++		LPDIRECT3DSURFACE9 SystemMemory = nullptr;
++		LPDIRECT3DDEVICE9 Device = nullptr;
++		D3DFORMAT Format = D3DFMT_UNKNOWN;
++		DWORD Count = 0;
++	} TPWReadback;
++}
++
++void TPWReleaseReadbackSurfaces()
++{
++	if (TPWReadback.RenderTarget)
++	{
++		TPWReadback.RenderTarget->Release();
++		TPWReadback.RenderTarget = nullptr;
++	}
++	if (TPWReadback.SystemMemory)
++	{
++		TPWReadback.SystemMemory->Release();
++		TPWReadback.SystemMemory = nullptr;
++	}
++	TPWReadback.Device = nullptr;
++	TPWReadback.Format = D3DFMT_UNKNOWN;
++}
++
++bool m_IDirectDrawSurfaceX::TPWSmallReadback(LPDIRECT3DSURFACE9 pSrc, const RECT& SrcRect, const RECT& DestRect)
++{
++	D3DSURFACE_DESC SrcDesc = {};
++	if (!pSrc || FAILED(pSrc->GetDesc(&SrcDesc)) || SrcDesc.MultiSampleType != D3DMULTISAMPLE_NONE ||
++		(SrcDesc.Format != D3DFMT_X8R8G8B8 && SrcDesc.Format != D3DFMT_A8R8G8B8))
++	{
++		return false;
++	}
++
++	// (Re)create the small surfaces for the current device and format
++	if (TPWReadback.Device != *d3d9Device || TPWReadback.Format != SrcDesc.Format || !TPWReadback.RenderTarget || !TPWReadback.SystemMemory)
++	{
++		TPWReleaseReadbackSurfaces();
++		if (FAILED((*d3d9Device)->CreateRenderTarget(TPWReadbackSize, TPWReadbackSize, SrcDesc.Format, D3DMULTISAMPLE_NONE, 0, FALSE, &TPWReadback.RenderTarget, nullptr)) ||
++			FAILED((*d3d9Device)->CreateOffscreenPlainSurface(TPWReadbackSize, TPWReadbackSize, SrcDesc.Format, D3DPOOL_SYSTEMMEM, &TPWReadback.SystemMemory, nullptr)))
++		{
++			LOG_LIMIT(10, __FUNCTION__ << " TPW: could not create small readback surfaces");
++			TPWReleaseReadbackSurfaces();
++			return false;
++		}
++		TPWReadback.Device = *d3d9Device;
++		TPWReadback.Format = SrcDesc.Format;
++	}
++
++	const LONG Width = DestRect.right - DestRect.left;
++	const LONG Height = DestRect.bottom - DestRect.top;
++	RECT SmallRect = { 0, 0, Width, Height };
++
++	// Copy only the rect on the GPU, then read back the small surface
++	if (FAILED((*d3d9Device)->StretchRect(pSrc, &SrcRect, TPWReadback.RenderTarget, &SmallRect, D3DTEXF_NONE)) ||
++		FAILED((*d3d9Device)->GetRenderTargetData(TPWReadback.RenderTarget, TPWReadback.SystemMemory)))
++	{
++		LOG_LIMIT(10, __FUNCTION__ << " TPW: small readback failed");
++		return false;
++	}
++
++	D3DLOCKED_RECT SrcLock = {};
++	if (FAILED(TPWReadback.SystemMemory->LockRect(&SrcLock, &SmallRect, D3DLOCK_READONLY)))
++	{
++		return false;
++	}
++
++	bool Copied = false;
++	RECT Dest = DestRect;
++	DDSURFACEDESC2 Desc = {};
++	Desc.dwSize = sizeof(DDSURFACEDESC2);
++	if (SUCCEEDED(Lock2(&Dest, &Desc, DDLOCK_WAIT | DDLOCK_WRITEONLY, nullptr, 0, 7)))
++	{
++		if (Desc.lpSurface && Desc.ddpfPixelFormat.dwRGBBitCount == 32)
++		{
++			for (LONG y = 0; y < Height; y++)
++			{
++				memcpy((BYTE*)Desc.lpSurface + y * Desc.lPitch, (const BYTE*)SrcLock.pBits + y * SrcLock.Pitch, Width * 4);
++			}
++			Copied = true;
++		}
++		Unlock(&Dest, 0);
++	}
++	TPWReadback.SystemMemory->UnlockRect();
++
++	if (Copied && TPWReadback.Count++ < 5)
++	{
++		Logging::Log() << __FUNCTION__ << " TPW: small render target readback " << Width << "x" << Height << " from " << SrcRect.left << "," << SrcRect.top;
++	}
++	return Copied;
++}
++
++HRESULT m_IDirectDrawSurfaceX::Blt(LPRECT lpDestRect,LPDIRECTDRAWSURFACE7 lpDDSrcSurface, LPRECT lpSrcRect, DWORD dwFlags, LPDDBLTFX lpDDBltFx, DWORD MipMapLevel, bool SyncSurfaces, bool PresentBlt)
+ {
++	TPWScopedSurfaceTimer TPWTimer(TPW_TIME_BLT);
+ 	Logging::LogDebug() << __FUNCTION__ << " (" << this << ")" <<
+ 		" DestRect = " << lpDestRect <<
+ 		" SrcSurface = " << lpDDSrcSurface <<
+@@ -916,6 +1012,14 @@ HRESULT m_IDirectDrawSurfaceX::Blt(LPRECT lpDestRect, LPDIRECTDRAWSURFACE7 lpDDS
+ 				PresentBlt = false;
+ 				hr = DD_OK;
+ 			}
++			// TPW: the cursor clipped at the screen edge gives a zero width or height copy, and the game quits when it fails.
++			// Nothing would be copied anyway, so report success.
++			else if (!ValidSrcRect || !ValidDestRect)
++			{
++				LOG_LIMIT(100, __FUNCTION__ << " TPW: empty rect copy skipped: " << lpSrcRect << " -> " << lpDestRect);
++				PresentBlt = false;
++				hr = DD_OK;
++			}
+ 			else
+ 			{
+ 				if (lpDDSrcSurface)
+@@ -1102,6 +1206,7 @@ HRESULT m_IDirectDrawSurfaceX::BltBatch(LPDDBLTBATCH lpDDBltBatch, DWORD dwCount
+ 
+ HRESULT m_IDirectDrawSurfaceX::BltFast(DWORD dwX, DWORD dwY, LPDIRECTDRAWSURFACE7 lpDDSrcSurface, LPRECT lpSrcRect, DWORD dwFlags, DWORD MipMapLevel)
+ {
++	TPWScopedSurfaceTimer TPWTimer(TPW_TIME_BLTFAST);
+ 	Logging::LogDebug() << __FUNCTION__ << " (" << this << ")";
+ 
+ 	// Check if source surface exists.
+@@ -1186,8 +1291,135 @@ HRESULT m_IDirectDrawSurfaceX::BltFast(DWORD dwX, DWORD dwY, LPDIRECTDRAWSURFACE
+ 			lpDestRect = nullptr;
+ 		}
+ 
++		// TPW: the game saves the background under its software mouse cursor every frame by copying small rects
++		// from the render target into colour-keyed system memory surfaces. Reading back the render target stalls
++		// the RTX Remix pipeline, and the rasterized content is not the displayed picture anyway, so fill the rect
++		// with the surface's source colour key instead, which the later colour-keyed blit treats as transparent.
++		if (Config.DdrawSkipRenderTargetReadback && lpDDSrcSurfaceX != this &&
++			(lpDDSrcSurfaceX->IsPrimaryOrBackBuffer() || lpDDSrcSurfaceX->IsRenderTarget()) &&
++			!IsPrimaryOrBackBuffer() && !IsRenderTarget() && !IsSurfaceTexture() &&
++			(surfaceDesc2.ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY) && (surfaceDesc2.dwFlags & DDSD_CKSRCBLT) &&
++			DestRect.right - DestRect.left <= 64 && DestRect.bottom - DestRect.top <= 64)
++		{
++			DDBLTFX BltFx = {};
++			BltFx.dwSize = sizeof(DDBLTFX);
++			BltFx.dwFillColor = surfaceDesc2.ddckCKSrcBlt.dwColorSpaceLowValue;
++			const HRESULT hrFill = Blt(&DestRect, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &BltFx, MipMapLevel);
++
++			static DWORD SkipCount = 0;
++			if (SkipCount++ < 5)
++			{
++				Logging::Log() << __FUNCTION__ << " TPW: skipped render target readback " << (DestRect.right - DestRect.left) << "x" <<
++					(DestRect.bottom - DestRect.top) << " filled with colour key " << Logging::hex(BltFx.dwFillColor) << " hr = " << (DDERR)hrFill;
++			}
++			if (SUCCEEDED(hrFill))
++			{
++				return hrFill;
++			}
++			// Fall back to the normal copy if the fill failed
++		}
++
++		// TPW: the same small copies into surfaces without a colour key keep their real content, but instead of
++		// reading back the whole render target into its shadow surface, only the rect is copied on the GPU into a
++		// small render target and read back from there.
++		else if (Config.DdrawSkipRenderTargetReadback && lpDDSrcSurfaceX != this && MipMapLevel == 0 &&
++			(lpDDSrcSurfaceX->IsPrimaryOrBackBuffer() || lpDDSrcSurfaceX->IsRenderTarget()) && !lpDDSrcSurfaceX->IsUsingShadowSurface() &&
++			!IsPrimaryOrBackBuffer() && !IsRenderTarget() && !IsSurfaceTexture() && (surfaceDesc2.ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY) &&
++			DestRect.right - DestRect.left > 0 && DestRect.bottom - DestRect.top > 0 &&
++			DestRect.right - DestRect.left <= TPWReadbackSize && DestRect.bottom - DestRect.top <= TPWReadbackSize &&
++			SrcRect.right - SrcRect.left == DestRect.right - DestRect.left && SrcRect.bottom - SrcRect.top == DestRect.bottom - DestRect.top &&
++			d3d9Device && *d3d9Device)
++		{
++			// Mode 2: no readback at all, the destination keeps its previous content
++			if (Config.DdrawSkipRenderTargetReadback == 2)
++			{
++				static DWORD NoReadbackCount = 0;
++				if (NoReadbackCount++ < 5)
++				{
++					Logging::Log() << __FUNCTION__ << " TPW: render target readback skipped " << (DestRect.right - DestRect.left) << "x" <<
++						(DestRect.bottom - DestRect.top) << " from " << SrcRect.left << "," << SrcRect.top;
++				}
++				return DD_OK;
++			}
++
++			ScopedCriticalSection ThreadLockDD(DdrawWrapper::GetDDCriticalSection());
++
++			if (TPWSmallReadback(lpDDSrcSurfaceX->Get3DSurface(), SrcRect, DestRect))
++			{
++				return DD_OK;
++			}
++			// Fall back to the normal copy
++		}
++
++		// TPW diagnostics: time BltFast per destination/source surface pair and log the most expensive pairs every 10 seconds
++		LARGE_INTEGER TPWStart, TPWEnd;
++		QueryPerformanceCounter(&TPWStart);
++
+ 		// BltFast is implemented using the normal Blt path.
+-		return Blt(lpDestRect, lpDDSrcSurface, lpSrcRect, BltFlags, nullptr, MipMapLevel);
++		const HRESULT hr = Blt(lpDestRect, lpDDSrcSurface, lpSrcRect, BltFlags, nullptr, MipMapLevel);
++
++		QueryPerformanceCounter(&TPWEnd);
++		{
++			struct BLTFASTSTATS { LONGLONG Ticks = 0; DWORD Count = 0; DWORD OtherThread = 0; LONG Width = 0; LONG Height = 0; DWORD Flags = 0; std::string Desc; };
++			static std::map<std::pair<void*, void*>, BLTFASTSTATS> Stats;
++			static DWORD LastLogTick = GetTickCount();
++			static DWORD LogCount = 0;
++
++			auto Describe = [](m_IDirectDrawSurfaceX* p)
++			{
++				std::string s = std::to_string(p->surfaceDesc2.dwWidth) + "x" + std::to_string(p->surfaceDesc2.dwHeight) +
++					" caps=" + std::to_string(p->surfaceDesc2.ddsCaps.dwCaps) + " pool=" + std::to_string(p->surface.Pool) +
++					" fmt=" + std::to_string(p->surface.Format);
++				if (p->IsPrimarySurface()) s += " PRIMARY";
++				if (p->IsBackBuffer()) s += " BACKBUFFER";
++				if (p->IsRenderTarget()) s += " RENDERTARGET";
++				if (p->IsSurfaceTexture()) s += " TEXTURE";
++				if (p->IsUsingEmulation()) s += " EMULATED";
++				if (p->IsColorKeyTexture()) s += " COLORKEYTEX";
++				return s;
++			};
++
++			ScopedCriticalSection ThreadLockDD(DdrawWrapper::GetDDCriticalSection());
++			BLTFASTSTATS& Entry = Stats[{ this, lpDDSrcSurfaceX }];
++			if (Entry.Desc.empty())
++			{
++				Entry.Desc = "dest " + Describe(this) + " <- src " + Describe(lpDDSrcSurfaceX);
++			}
++			Entry.Ticks += TPWEnd.QuadPart - TPWStart.QuadPart;
++			Entry.Count++;
++			Entry.Width = SrcRect.right - SrcRect.left;
++			Entry.Height = SrcRect.bottom - SrcRect.top;
++			Entry.Flags = dwFlags;
++			if (TPWRenderThreadId && GetCurrentThreadId() != TPWRenderThreadId)
++			{
++				Entry.OtherThread++;
++			}
++
++			const DWORD Tick = GetTickCount();
++			if (Tick - LastLogTick >= 10000 && LogCount < 30)
++			{
++				LastLogTick = Tick;
++				LogCount++;
++				LARGE_INTEGER Freq;
++				QueryPerformanceFrequency(&Freq);
++				std::vector<const BLTFASTSTATS*> Sorted;
++				for (const auto& it : Stats)
++				{
++					Sorted.push_back(&it.second);
++				}
++				std::sort(Sorted.begin(), Sorted.end(), [](const BLTFASTSTATS* a, const BLTFASTSTATS* b) { return a->Ticks > b->Ticks; });
++				for (size_t i = 0; i < Sorted.size() && i < 5; i++)
++				{
++					const BLTFASTSTATS* s = Sorted[i];
++					Logging::Log() << __FUNCTION__ << " TPW BltFast top " << (i + 1) << ": " << (DWORD)(s->Ticks * 1000 / Freq.QuadPart) << " ms, " <<
++						s->Count << " calls (other thread " << s->OtherThread << "), last rect " << s->Width << "x" << s->Height <<
++						" flags " << Logging::hex(s->Flags) << " " << s->Desc.c_str();
++				}
++				Stats.clear();
++			}
++		}
++
++		return hr;
+ 	}
+ 
+ 	// The native DirectDraw implementation expects the real source surface.
+@@ -1484,6 +1716,7 @@ HRESULT m_IDirectDrawSurfaceX::EnumOverlayZOrders2(DWORD dwFlags, LPVOID lpConte
+ 
+ HRESULT m_IDirectDrawSurfaceX::Flip(LPDIRECTDRAWSURFACE7 lpDDSurfaceTargetOverride, DWORD dwFlags, DWORD DirectXVersion)
+ {
++	TPWScopedSurfaceTimer TPWTimer(TPW_TIME_FLIP);
+ 	Logging::LogDebug() << __FUNCTION__ << " (" << this << ")" <<
+ 		" SrcSurface = " << lpDDSurfaceTargetOverride <<
+ 		" Flags = " << Logging::hex(dwFlags) <<
+@@ -2600,6 +2833,7 @@ HRESULT m_IDirectDrawSurfaceX::IsLost()
+ 
+ HRESULT m_IDirectDrawSurfaceX::Lock(LPRECT lpDestRect, LPDDSURFACEDESC lpDDSurfaceDesc, DWORD dwFlags, HANDLE hEvent, DWORD MipMapLevel, DWORD DirectXVersion)
+ {
++	TPWScopedSurfaceTimer TPWTimer(TPW_TIME_LOCK);
+ 	Logging::LogDebug() << __FUNCTION__ << " (" << this << ")";
+ 
+ 	// Game using old DirectX, Convert to LPDDSURFACEDESC2
+@@ -2627,6 +2861,7 @@ HRESULT m_IDirectDrawSurfaceX::Lock(LPRECT lpDestRect, LPDDSURFACEDESC lpDDSurfa
+ 
+ HRESULT m_IDirectDrawSurfaceX::Lock2(LPRECT lpDestRect, LPDDSURFACEDESC2 lpDDSurfaceDesc2, DWORD dwFlags, HANDLE hEvent, DWORD MipMapLevel, DWORD DirectXVersion)
+ {
++	TPWScopedSurfaceTimer TPWTimer(TPW_TIME_LOCK);
+ 	Logging::LogDebug() << __FUNCTION__ << " (" << this << ")" <<
+ 		" Rect = " << lpDestRect <<
+ 		" Desc = " << lpDDSurfaceDesc2 <<
+@@ -3342,6 +3577,7 @@ HRESULT m_IDirectDrawSurfaceX::SetPalette(LPDIRECTDRAWPALETTE lpDDPalette)
+ 
+ HRESULT m_IDirectDrawSurfaceX::Unlock(LPRECT lpRect, DWORD MipMapLevel)
+ {
++	TPWScopedSurfaceTimer TPWTimer(TPW_TIME_UNLOCK);
+ 	Logging::LogDebug() << __FUNCTION__ << " (" << this << ")" <<
+ 		" Rect = " << lpRect <<
+ 		" MipMapLevel = " << MipMapLevel;
+@@ -5844,6 +6080,13 @@ void m_IDirectDrawSurfaceX::ClearUsing3DFlag()
+ 
+ void m_IDirectDrawSurfaceX::ReleaseD9Surface(bool BackupData, bool ResetSurface, bool IsDeviceLost)
+ {
++	// TPW: cached UI state blocks may reference this surface's d3d9 textures
++	if (surface.Texture || surface.DrawTexture)
++	{
++		InterlockedIncrement(&TPWTextureGeneration);
++		m_IDirect3DDeviceX::OnSurfaceTextureReleased();
++	}
++
+ 	ScopedCriticalSection ThreadLock(GetCriticalSection(), Config.Dd7to9);
+ 
+ 	// Check if surface is busy
+@@ -6013,6 +6256,13 @@ void m_IDirectDrawSurfaceX::ReleaseD9Surface(bool BackupData, bool ResetSurface,
+ 
+ void m_IDirectDrawSurfaceX::ReleaseD9AuxiliarySurfaces(bool ResetSurface)
+ {
++	// TPW: cached UI state blocks may reference this surface's d3d9 textures
++	if (surface.Texture || surface.DrawTexture)
++	{
++		InterlockedIncrement(&TPWTextureGeneration);
++		m_IDirect3DDeviceX::OnSurfaceTextureReleased();
++	}
++
+ 	// Release d3d9 shadow surface when surface is released
+ 	if (surface.Shadow && (!ResetSurface || !surface.Surface))
+ 	{
+@@ -6791,6 +7041,12 @@ void m_IDirectDrawSurfaceX::ComputeSurfaceWrites()
+ 
+ void m_IDirectDrawSurfaceX::BeginWritePresent(bool IsSkipScene)
+ {
++	// Draw queued UI that still uses this texture before its content changes
++	if (IsSurfaceTexture())
++	{
++		m_IDirect3DDeviceX::FlushUIQueueBeforeTextureWrite(this);
++	}
++
+ 	// Check if data needs to be presented before write
+ 	if (dirtyFlag && !ShouldWriteToGDI())
+ 	{
+@@ -10182,3 +10438,98 @@ void m_IDirectDrawSurfaceX::CleanupDummySurface()
+ {
+ 	dummySurface.clear();
+ }
++
++// Diagnostics: saves mip level 0 of this texture as a 32-bit BMP with alpha, so a draw can be matched to the game's image files
++bool m_IDirectDrawSurfaceX::TPWDumpTextureToBMP(const char* FileName)
++{
++	if (!surface.Surface && !surface.Texture)
++	{
++		return false;
++	}
++
++	D3DSURFACE_DESC Desc = {};
++	if (FAILED(surface.Surface ? surface.Surface->GetDesc(&Desc) : surface.Texture->GetLevelDesc(GetD9MipMapLevel(0), &Desc)) ||
++		!Desc.Width || !Desc.Height || Desc.Width > 4096 || Desc.Height > 4096)
++	{
++		return false;
++	}
++
++	const D3DFORMAT Format = Desc.Format;
++	if (Format != D3DFMT_A8R8G8B8 && Format != D3DFMT_X8R8G8B8 && Format != D3DFMT_R5G6B5 &&
++		Format != D3DFMT_A1R5G5B5 && Format != D3DFMT_X1R5G5B5 && Format != D3DFMT_A4R4G4B4)
++	{
++		Logging::Log() << __FUNCTION__ << " TPW texture dump skipped, unsupported format " << Format;
++		return false;
++	}
++
++	D3DLOCKED_RECT LockRect = {};
++	if (FAILED(LockD3d9Surface(&LockRect, nullptr, D3DLOCK_READONLY, 0)) || !LockRect.pBits)
++	{
++		Logging::Log() << __FUNCTION__ << " TPW texture dump failed to lock";
++		return false;
++	}
++
++	std::vector<DWORD> Pixels(Desc.Width * Desc.Height);
++	for (UINT y = 0; y < Desc.Height; y++)
++	{
++		const BYTE* Row = (const BYTE*)LockRect.pBits + y * LockRect.Pitch;
++		DWORD* Out = &Pixels[(Desc.Height - 1 - y) * Desc.Width];	// BMP rows go bottom up
++		for (UINT x = 0; x < Desc.Width; x++)
++		{
++			DWORD c = 0;
++			switch (Format)
++			{
++			case D3DFMT_A8R8G8B8: c = ((const DWORD*)Row)[x]; break;
++			case D3DFMT_X8R8G8B8: c = ((const DWORD*)Row)[x] | 0xFF000000; break;
++			case D3DFMT_R5G6B5:
++			{
++				const WORD w = ((const WORD*)Row)[x];
++				c = 0xFF000000 | ((((w >> 11) & 0x1F) * 255 / 31) << 16) | ((((w >> 5) & 0x3F) * 255 / 63) << 8) | ((w & 0x1F) * 255 / 31);
++				break;
++			}
++			case D3DFMT_A1R5G5B5:
++			case D3DFMT_X1R5G5B5:
++			{
++				const WORD w = ((const WORD*)Row)[x];
++				const DWORD a = (Format == D3DFMT_X1R5G5B5 || (w & 0x8000)) ? 0xFF000000 : 0;
++				c = a | ((((w >> 10) & 0x1F) * 255 / 31) << 16) | ((((w >> 5) & 0x1F) * 255 / 31) << 8) | ((w & 0x1F) * 255 / 31);
++				break;
++			}
++			case D3DFMT_A4R4G4B4:
++			{
++				const WORD w = ((const WORD*)Row)[x];
++				c = (((w >> 12) & 0xF) * 17 << 24) | (((w >> 8) & 0xF) * 17 << 16) | (((w >> 4) & 0xF) * 17 << 8) | ((w & 0xF) * 17);
++				break;
++			}
++			default: break;
++			}
++			Out[x] = c;
++		}
++	}
++	UnLockD3d9Surface(0);
++
++	BITMAPINFOHEADER bi = {};
++	bi.biSize = sizeof(BITMAPINFOHEADER);
++	bi.biWidth = Desc.Width;
++	bi.biHeight = Desc.Height;
++	bi.biPlanes = 1;
++	bi.biBitCount = 32;
++	bi.biCompression = BI_RGB;
++	BITMAPFILEHEADER bmf = {};
++	bmf.bfType = 0x4D42; // "BM"
++	bmf.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
++	bmf.bfSize = bmf.bfOffBits + (DWORD)(Pixels.size() * sizeof(DWORD));
++
++	std::ofstream OutFile(FileName, std::ios::binary | std::ios::out);
++	if (!OutFile.is_open())
++	{
++		return false;
++	}
++	OutFile.write((const char*)&bmf, sizeof(bmf));
++	OutFile.write((const char*)&bi, sizeof(bi));
++	OutFile.write((const char*)Pixels.data(), Pixels.size() * sizeof(DWORD));
++	OutFile.close();
++
++	Logging::Log() << __FUNCTION__ << " TPW texture dump " << this << " " << Desc.Width << "x" << Desc.Height << " format " << Format << " -> " << FileName;
++	return true;
++}
+diff --git a/ddraw/IDirectDrawSurfaceX.h b/ddraw/IDirectDrawSurfaceX.h
+index 6f108c1d..d0a6538e 100644
+--- a/ddraw/IDirectDrawSurfaceX.h
++++ b/ddraw/IDirectDrawSurfaceX.h
+@@ -289,6 +289,7 @@ private:
+ 
+ 	// Helper functions
+ 	LPDIRECT3DSURFACE9 Get3DSurface();
++	bool TPWSmallReadback(LPDIRECT3DSURFACE9 pSrc, const RECT& SrcRect, const RECT& DestRect);
+ 	LPDIRECT3DSURFACE9 Get3DMipMapSurface(DWORD MipMapLevel);
+ 	void Release3DMipMapSurface(LPDIRECT3DSURFACE9 pSurfaceD9, DWORD MipMapLevel);
+ 	LPDIRECT3DTEXTURE9 Get3DTexture();
+@@ -622,6 +623,7 @@ public:
+ 	inline DWORD GetD9Height() const { return surface.Height; }
+ 	inline D3DFORMAT GetD9Format() const { return surface.Format; }
+ 	inline LPDIRECT3DTEXTURE9 GetD9PaletteTexture() const { return primary.PaletteTexture; }
++	bool TPWDumpTextureToBMP(const char* FileName);
+ 	inline m_IDirect3DTextureX* GetAttachedTexture() { return attached3DTexture; }
+ 	void ClearUsing3DFlag();
+ 	HRESULT GetPresentWindowRect(LPRECT pRect, RECT& DestRect);
+diff --git a/ddraw/IDirectDrawX.cpp b/ddraw/IDirectDrawX.cpp
+index 38367b19..0ab6a7a9 100644
+--- a/ddraw/IDirectDrawX.cpp
++++ b/ddraw/IDirectDrawX.cpp
+@@ -48,6 +48,296 @@ namespace {
+ 	DISPLAYSETTINGS Exclusive = {};
+ 	HWND LastUsedHWnd = nullptr;	// Only initialize this here
+ 
++	// TPW: pillarbox (game aspect ratio inside the native desktop resolution)
++	bool PillarboxActive = false;
++	HWND PillarboxBackdrop = nullptr;
++
++	LRESULT CALLBACK PillarboxBackdropProc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
++	{
++		// Never take focus or activation away from the game window
++		if (Msg == WM_MOUSEACTIVATE)
++		{
++			return MA_NOACTIVATE;
++		}
++		return DefWindowProc(hWnd, Msg, wParam, lParam);
++	}
++
++	void ShowPillarboxBackdrop(HWND hGameWnd, const RECT& MonitorRect)
++	{
++		static const wchar_t* ClassName = L"DxWrapperPillarboxBackdrop";
++		static bool IsRegistered = false;
++		if (!IsRegistered)
++		{
++			WNDCLASSW wc = {};
++			wc.lpfnWndProc = PillarboxBackdropProc;
++			wc.hInstance = GetModuleHandle(nullptr);
++			wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
++			wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
++			wc.lpszClassName = ClassName;
++			IsRegistered = (RegisterClassW(&wc) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS);
++		}
++		if (!IsRegistered)
++		{
++			return;
++		}
++		if (!IsWindow(PillarboxBackdrop))
++		{
++			PillarboxBackdrop = CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, ClassName, L"", WS_POPUP,
++				MonitorRect.left, MonitorRect.top, MonitorRect.right - MonitorRect.left, MonitorRect.bottom - MonitorRect.top,
++				nullptr, nullptr, GetModuleHandle(nullptr), nullptr);
++		}
++		if (PillarboxBackdrop)
++		{
++			// Place directly behind the game window
++			SetWindowPos(PillarboxBackdrop, hGameWnd, MonitorRect.left, MonitorRect.top,
++				MonitorRect.right - MonitorRect.left, MonitorRect.bottom - MonitorRect.top, SWP_NOACTIVATE | SWP_SHOWWINDOW);
++		}
++	}
++
++	void HidePillarboxBackdrop()
++	{
++		if (IsWindow(PillarboxBackdrop))
++		{
++			DestroyWindow(PillarboxBackdrop);
++		}
++		PillarboxBackdrop = nullptr;
++	}
++
++	// TPW: pillarbox window modes (DdrawPillarboxWindowed): 0 borderless on a black backdrop, 1 borderless above the
++	// taskbar with the desktop visible around it, 2 resizable window with a title bar and minimize button
++	constexpr LONG PillarboxWindowedStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME;
++	constexpr LONG PillarboxMinClientWidth = 320;
++	bool PillarboxWindowPlaced = false;	// After the first placement the framed window stays where the user moves it
++	RECT PillarboxLastWindowRect = {};	// Last good rect of the framed window, kept up to date on Present
++
++	// TPW: mouse trap. The game moves its own cursor from DirectInput and doesn't know when the Windows cursor leaves
++	// its window, so while the game is active the cursor is kept inside the picture. Ctrl+Alt frees it, a click in
++	// the picture traps it again.
++	bool MouseTrapped = false;		// ClipCursor is set by us
++	bool MouseTrapReleased = false;	// User freed the cursor with Ctrl+Alt
++
++	void TPWReleaseMouseTrap()
++	{
++		if (MouseTrapped)
++		{
++			ClipCursor(nullptr);
++			MouseTrapped = false;
++		}
++	}
++
++	void TPWUpdateMouseTrap(HWND hWnd)
++	{
++		// Note: in menus the game presents from another thread, ClipCursor works from any thread
++		if (!PillarboxActive || !IsWindow(hWnd) || IsIconic(hWnd) || GetForegroundWindow() != hWnd)
++		{
++			TPWReleaseMouseTrap();
++			return;
++		}
++
++		RECT Client = {};
++		GetClientRect(hWnd, &Client);
++		MapWindowPoints(hWnd, nullptr, reinterpret_cast<POINT*>(&Client), 2);
++		POINT Cursor = {};
++		GetCursorPos(&Cursor);
++		const bool CursorInClient = PtInRect(&Client, Cursor) != FALSE;
++
++		// Ctrl+Alt frees the cursor
++		static bool HotkeyDown = false;
++		const bool Hotkey = (GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_MENU) & 0x8000);
++		if (Hotkey && !HotkeyDown && MouseTrapped)
++		{
++			MouseTrapReleased = true;
++			LOG_LIMIT(20, __FUNCTION__ << " TPW: mouse freed (Ctrl+Alt)");
++		}
++		HotkeyDown = Hotkey;
++
++		// A click in the picture traps it again
++		if (MouseTrapReleased && CursorInClient && !Hotkey &&
++			((GetAsyncKeyState(VK_LBUTTON) & 0x8000) || (GetAsyncKeyState(VK_RBUTTON) & 0x8000)))
++		{
++			MouseTrapReleased = false;
++		}
++
++		if (MouseTrapReleased || (!MouseTrapped && !CursorInClient) || Client.right <= Client.left || Client.bottom <= Client.top)
++		{
++			TPWReleaseMouseTrap();
++			return;
++		}
++
++		// Windows drops the clip on some focus and window changes, so keep it set
++		RECT Current = {};
++		if (!MouseTrapped || !GetClipCursor(&Current) || !EqualRect(&Current, &Client))
++		{
++			ClipCursor(&Client);
++			if (!MouseTrapped)
++			{
++				LOG_LIMIT(20, __FUNCTION__ << " TPW: mouse trapped in the game picture");
++			}
++			MouseTrapped = true;
++		}
++	}
++
++	inline bool IsPillarboxFramed() { return Config.DdrawPillarboxWindowed >= 2; }
++
++	// The framed window's rect is saved next to the game exe, so the next run starts with the same size and place
++	std::string GetPillarboxWindowFile()
++	{
++		char Path[MAX_PATH] = {};
++		const DWORD Len = GetModuleFileNameA(nullptr, Path, MAX_PATH);
++		if (Len == 0 || Len == MAX_PATH)
++		{
++			return std::string();
++		}
++		char* LastSlash = strrchr(Path, '\\');
++		if (LastSlash)
++		{
++			*(LastSlash + 1) = '\0';
++		}
++		return std::string(Path) + "dxwrapper-window.txt";
++	}
++
++	bool LoadPillarboxWindowRect(RECT& Rect)
++	{
++		const std::string File = GetPillarboxWindowFile();
++		FILE* f = nullptr;
++		if (File.empty() || fopen_s(&f, File.c_str(), "r") != 0 || !f)
++		{
++			return false;
++		}
++		LONG Left = 0, Top = 0, Width = 0, Height = 0;
++		const bool Ok = (fscanf_s(f, "%ld %ld %ld %ld", &Left, &Top, &Width, &Height) == 4 && Width > 0 && Height > 0);
++		fclose(f);
++		if (Ok)
++		{
++			Rect = { Left, Top, Left + Width, Top + Height };
++		}
++		return Ok;
++	}
++
++	void SavePillarboxWindowRect(const RECT& Rect)
++	{
++		const std::string File = GetPillarboxWindowFile();
++		FILE* f = nullptr;
++		if (File.empty() || fopen_s(&f, File.c_str(), "w") != 0 || !f)
++		{
++			return;
++		}
++		fprintf(f, "%ld %ld %ld %ld\n", Rect.left, Rect.top, Rect.right - Rect.left, Rect.bottom - Rect.top);
++		fclose(f);
++	}
++
++	void ApplyPillarboxWindowStyle(HWND hWnd)
++	{
++		const LONG lStyle = GetWindowLong(hWnd, GWL_STYLE);
++		const LONG lNewStyle = IsPillarboxFramed() ?
++			(lStyle & ~(WS_POPUP | WS_MAXIMIZEBOX)) | PillarboxWindowedStyle :
++			(lStyle & ~(WS_CAPTION | WS_BORDER | WS_THICKFRAME | WS_DLGFRAME)) | WS_POPUP;
++		if (lNewStyle != lStyle)
++		{
++			SetWindowLong(hWnd, GWL_STYLE, lNewStyle);
++		}
++	}
++
++	RECT GetWindowedPillarboxRect(HWND hWnd, const RECT& WorkArea, DWORD GameWidth, DWORD GameHeight)
++	{
++		RECT Frame = {};
++		if (IsPillarboxFramed())
++		{
++			AdjustWindowRectEx(&Frame, PillarboxWindowedStyle, FALSE, GetWindowLong(hWnd, GWL_EXSTYLE));
++		}
++		const LONG FrameWidth = Frame.right - Frame.left;
++		const LONG FrameHeight = Frame.bottom - Frame.top;
++
++		// Largest client area with the game's aspect ratio that fits the work area together with the frame
++		const LONG MaxWidth = (std::max)(WorkArea.right - WorkArea.left - FrameWidth, 64L);
++		const LONG MaxHeight = (std::max)(WorkArea.bottom - WorkArea.top - FrameHeight, 48L);
++		LONG Width = MaxWidth;
++		LONG Height = MaxHeight;
++		if ((LONGLONG)GameWidth * MaxHeight < (LONGLONG)GameHeight * MaxWidth)
++		{
++			Width = (LONG)((LONGLONG)MaxHeight * GameWidth / GameHeight);
++		}
++		else
++		{
++			Height = (LONG)((LONGLONG)MaxWidth * GameHeight / GameWidth);
++		}
++		const LONG WindowWidth = Width + FrameWidth;
++		const LONG WindowHeight = Height + FrameHeight;
++
++		// Keep the user's window, or the one saved by the last run, with its height fitted to the game's aspect ratio
++		if (IsPillarboxFramed())
++		{
++			RECT Saved = PillarboxLastWindowRect;
++			if (Saved.right <= Saved.left && !PillarboxWindowPlaced)
++			{
++				LoadPillarboxWindowRect(Saved);
++			}
++			if (Saved.right - Saved.left >= FrameWidth + PillarboxMinClientWidth && MonitorFromRect(&Saved, MONITOR_DEFAULTTONULL))
++			{
++				const LONG ClientWidth = Saved.right - Saved.left - FrameWidth;
++				const LONG ClientHeight = (LONG)((LONGLONG)ClientWidth * GameHeight / GameWidth);
++				return { Saved.left, Saved.top, Saved.right, Saved.top + ClientHeight + FrameHeight };
++			}
++		}
++
++		const LONG Left = WorkArea.left + (WorkArea.right - WorkArea.left - WindowWidth) / 2;
++		const LONG Top = WorkArea.top + (WorkArea.bottom - WorkArea.top - WindowHeight) / 2;
++		return { Left, Top, Left + WindowWidth, Top + WindowHeight };
++	}
++
++	// A device reset (for example after restoring the minimized window) resizes the window to the game's mode at the
++	// monitor origin and removes its frame, which also breaks the mouse scaling, so put the window back
++	void RestorePillarboxWindow(HWND hWnd, DWORD GameWidth, DWORD GameHeight)
++	{
++		if (!PillarboxActive || !IsWindow(hWnd) || IsIconic(hWnd) || !GameWidth || !GameHeight)
++		{
++			return;
++		}
++		MONITORINFO mi = {};
++		mi.cbSize = sizeof(MONITORINFO);
++		if (!GetMonitorInfo(MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST), &mi))
++		{
++			return;
++		}
++
++		RECT Rect = {};
++		if (IsPillarboxFramed() && PillarboxLastWindowRect.right > PillarboxLastWindowRect.left)
++		{
++			Rect = PillarboxLastWindowRect;
++		}
++		else if (Config.DdrawPillarboxWindowed)
++		{
++			Rect = GetWindowedPillarboxRect(hWnd, mi.rcWork, GameWidth, GameHeight);
++		}
++		else
++		{
++			const LONG MonitorWidth = mi.rcMonitor.right - mi.rcMonitor.left;
++			const LONG MonitorHeight = mi.rcMonitor.bottom - mi.rcMonitor.top;
++			LONG Width = MonitorWidth;
++			LONG Height = MonitorHeight;
++			if ((LONGLONG)GameWidth * MonitorHeight < (LONGLONG)GameHeight * MonitorWidth)
++			{
++				Width = (LONG)((LONGLONG)MonitorHeight * GameWidth / GameHeight);
++			}
++			else
++			{
++				Height = (LONG)((LONGLONG)MonitorWidth * GameHeight / GameWidth);
++			}
++			const LONG Left = mi.rcMonitor.left + (MonitorWidth - Width) / 2;
++			const LONG Top = mi.rcMonitor.top + (MonitorHeight - Height) / 2;
++			Rect = { Left, Top, Left + Width, Top + Height };
++		}
++
++		ApplyPillarboxWindowStyle(hWnd);
++		SetWindowPos(hWnd, HWND_TOP, Rect.left, Rect.top, Rect.right - Rect.left, Rect.bottom - Rect.top, SWP_FRAMECHANGED | SWP_NOACTIVATE);
++		if (!Config.DdrawPillarboxWindowed)
++		{
++			ShowPillarboxBackdrop(hWnd, mi.rcMonitor);
++		}
++		LOG_LIMIT(20, __FUNCTION__ << " Pillarbox: window restored after reset to " << Rect.left << "," << Rect.top << " " <<
++			(Rect.right - Rect.left) << "x" << (Rect.bottom - Rect.top));
++	}
++
+ 	// Clipper
+ 	HWND ClipperHWnd = nullptr;
+ 
+@@ -1711,6 +2001,8 @@ HRESULT m_IDirectDrawX::RestoreDisplayMode()
+ 		}
+ 
+ 		// Reset mode
++		HidePillarboxBackdrop();
++		TPWReleaseMouseTrap();
+ 		FullScreenWindowed = false;
+ 		ExclusiveMode = false;
+ 		DisplayMode.Width = 0;
+@@ -1986,6 +2278,8 @@ HRESULT m_IDirectDrawX::SetDisplayMode(DWORD dwWidth, DWORD dwHeight, DWORD dwBP
+ 		DWORD LastHeight = Device.Height;
+ 		DWORD LastBPP = DisplayMode.BPP;
+ 		DWORD LastRefreshRate = DisplayMode.RefreshRate;
++		const DWORD LastModeWidth = DisplayMode.Width;
++		const DWORD LastModeHeight = DisplayMode.Height;
+ 
+ 		DWORD NewBPP = (Config.DdrawOverrideBitMode) ? Config.DdrawOverrideBitMode : dwBPP;
+ 
+@@ -1994,8 +2288,8 @@ HRESULT m_IDirectDrawX::SetDisplayMode(DWORD dwWidth, DWORD dwHeight, DWORD dwBP
+ 			DWORD FoundWidth = dwWidth;
+ 			DWORD FoundHeight = dwHeight;
+ 
+-			// Check if it is a supported resolution
+-			if ((IsExclusiveMode() && !Config.EnableWindowMode) || Config.FullscreenWindowMode || Config.ForceExclusiveFullscreen)
++			// Check if it is a supported resolution (not needed with native resolution, the display mode is not changed)
++			if (((IsExclusiveMode() && !Config.EnableWindowMode) || Config.FullscreenWindowMode || Config.ForceExclusiveFullscreen) && !Config.DdrawUseNativeResolution)
+ 			{
+ 				// Check for device interface
+ 				if (FAILED(CheckInterface(__FUNCTION__, false)))
+@@ -2068,7 +2362,10 @@ HRESULT m_IDirectDrawX::SetDisplayMode(DWORD dwWidth, DWORD dwHeight, DWORD dwBP
+ 		}
+ 
+ 		// Update the d3d9 device to use new display mode
+-		if (LastWidth != Device.Width || LastHeight != Device.Height || (!Device.IsWindowed && LastRefreshRate != DisplayMode.RefreshRate))
++		// TPW: with native resolution the device size does not change, but the pillarbox depends on the game's display mode
++		const bool PillarboxModeChanged = Config.DdrawUseNativeResolution && Config.DdrawMaintainAspectRatio && d3d9Device &&
++			(LastModeWidth != DisplayMode.Width || LastModeHeight != DisplayMode.Height);
++		if (LastWidth != Device.Width || LastHeight != Device.Height || (!Device.IsWindowed && LastRefreshRate != DisplayMode.RefreshRate) || PillarboxModeChanged)
+ 		{
+ 			WasDeviceCreated = true;
+ 
+@@ -3582,6 +3879,65 @@ HRESULT m_IDirectDrawX::CreateD9Device(char* FunctionName)
+ 		}
+ 	}
+ 
++	// TPW: pillarbox the game's display mode aspect ratio inside the native resolution, using a
++	// centered windowed device and a black backdrop window, so the display mode is never changed
++	bool UsePillarbox = false;
++	RECT PillarboxRect = {}, PillarboxMonitorRect = {};
++	if (Config.DdrawUseNativeResolution && Config.DdrawMaintainAspectRatio)
++	{
++		LOG_LIMIT(20, __FUNCTION__ << " Pillarbox check: game mode " << DisplayMode.Width << "x" << DisplayMode.Height <<
++			" back buffer " << BackBufferWidth << "x" << BackBufferHeight << " wnd: " << hWnd);
++	}
++	// Note: FullscreenWindowMode also turns on EnableWindowMode in the settings, only real window mode is excluded
++	if (hWnd && Config.DdrawUseNativeResolution && Config.DdrawMaintainAspectRatio && (Config.FullscreenWindowMode || !Config.EnableWindowMode) &&
++		DisplayMode.Width && DisplayMode.Height && BackBufferWidth && BackBufferHeight)
++	{
++		MONITORINFO mi = {};
++		mi.cbSize = sizeof(MONITORINFO);
++		if (!GetMonitorInfo(MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST), &mi))
++		{
++			LOG_LIMIT(20, __FUNCTION__ << " Pillarbox warning: GetMonitorInfo failed, using back buffer size as monitor rect");
++			mi.rcMonitor = { 0, 0, (LONG)BackBufferWidth, (LONG)BackBufferHeight };
++		}
++		{
++			DWORD Width = BackBufferWidth;
++			DWORD Height = BackBufferHeight;
++			if (DisplayMode.Width * BackBufferHeight < DisplayMode.Height * BackBufferWidth)
++			{
++				Width = BackBufferHeight * DisplayMode.Width / DisplayMode.Height;
++			}
++			else
++			{
++				Height = BackBufferWidth * DisplayMode.Height / DisplayMode.Width;
++			}
++			if (Width != BackBufferWidth || Height != BackBufferHeight)
++			{
++				UsePillarbox = true;
++				PillarboxMonitorRect = mi.rcMonitor;
++				LONG Left = mi.rcMonitor.left + (LONG)(BackBufferWidth - Width) / 2;
++				LONG Top = mi.rcMonitor.top + (LONG)(BackBufferHeight - Height) / 2;
++				PillarboxRect = { Left, Top, Left + (LONG)Width, Top + (LONG)Height };
++				// The back buffer keeps the game's own size, so the game renders straight into it (RTX Remix only
++				// raytraces draws to the swapchain back buffer); the windowed swapchain scales it to the window.
++				BackBufferWidth = DisplayMode.Width;
++				BackBufferHeight = DisplayMode.Height;
++				LOG_ONCE(__FUNCTION__ << " Pillarbox: game " << DisplayMode.Width << "x" << DisplayMode.Height <<
++					" shown as " << Width << "x" << Height << " at " << Left << "," << Top);
++				if (Config.DdrawPillarboxWindowed)
++				{
++					PillarboxRect = GetWindowedPillarboxRect(hWnd, mi.rcWork, DisplayMode.Width, DisplayMode.Height);
++					LOG_LIMIT(20, __FUNCTION__ << " Pillarbox: windowed, window " << (PillarboxRect.right - PillarboxRect.left) << "x" <<
++						(PillarboxRect.bottom - PillarboxRect.top) << " at " << PillarboxRect.left << "," << PillarboxRect.top);
++				}
++			}
++			else
++			{
++				LOG_LIMIT(20, __FUNCTION__ << " Pillarbox not needed: same aspect ratio");
++			}
++		}
++	}
++	PillarboxActive = UsePillarbox;
++
+ 	// Set display window
+ 	presParams = {};
+ 
+@@ -3605,7 +3961,7 @@ HRESULT m_IDirectDrawX::CreateD9Device(char* FunctionName)
+ 	presParams.hDeviceWindow = hWnd;
+ 
+ 	// Set parameters for the current display mode
+-	if (Device.IsWindowed || hWnd == nullptr)
++	if (Device.IsWindowed || hWnd == nullptr || UsePillarbox)
+ 	{
+ 		// Window mode
+ 		presParams.Windowed = TRUE;
+@@ -3756,9 +4112,33 @@ HRESULT m_IDirectDrawX::CreateD9Device(char* FunctionName)
+ 	};
+ 
+ 	// Prepare window and display size
+-	if ((!presParams.Windowed || FullScreenWindowed) && !Config.EnableWindowMode)
++	if (UsePillarbox)
++	{
++		// Game window centered on the monitor: borderless with a black backdrop behind it, borderless
++		// without the backdrop, or a normal window with a title bar
++		ApplyPillarboxWindowStyle(hWnd);
++		if (!(Config.DdrawPillarboxWindowed && IsIconic(hWnd)))
++		{
++			SetWindowPos(hWnd, HWND_TOP, PillarboxRect.left, PillarboxRect.top,
++				PillarboxRect.right - PillarboxRect.left, PillarboxRect.bottom - PillarboxRect.top, SWP_FRAMECHANGED | SWP_NOACTIVATE);
++		}
++		if (Config.DdrawPillarboxWindowed)
++		{
++			HidePillarboxBackdrop();
++		}
++		else
++		{
++			ShowPillarboxBackdrop(hWnd, PillarboxMonitorRect);
++		}
++	}
++	else
+ 	{
+-		SetWindowFullScreen::FullScreen(hm, hWnd, presParams.BackBufferWidth, presParams.BackBufferHeight);
++		HidePillarboxBackdrop();
++
++		if ((!presParams.Windowed || FullScreenWindowed) && !Config.EnableWindowMode)
++		{
++			SetWindowFullScreen::FullScreen(hm, hWnd, presParams.BackBufferWidth, presParams.BackBufferHeight);
++		}
+ 	}
+ 
+ 	// Create d3d9 Device
+@@ -3812,6 +4192,28 @@ HRESULT m_IDirectDrawX::CreateD9Device(char* FunctionName)
+ 		return hr;
+ 	}
+ 
++	// TPW: device creation/reset moves the window back to the monitor origin, so center it again
++	if (UsePillarbox && IsWindow(hWnd) && !(Config.DdrawPillarboxWindowed && IsIconic(hWnd)))
++	{
++		// Device creation also strips the window frame, so apply the style again
++		ApplyPillarboxWindowStyle(hWnd);
++		SetWindowPos(hWnd, HWND_TOP, PillarboxRect.left, PillarboxRect.top,
++			PillarboxRect.right - PillarboxRect.left, PillarboxRect.bottom - PillarboxRect.top, SWP_FRAMECHANGED | SWP_NOACTIVATE);
++		if (IsPillarboxFramed())
++		{
++			PillarboxWindowPlaced = true;
++			PillarboxLastWindowRect = PillarboxRect;
++		}
++		if (!Config.DdrawPillarboxWindowed)
++		{
++			ShowPillarboxBackdrop(hWnd, PillarboxMonitorRect);
++		}
++		RECT rc = {};
++		GetWindowRect(hWnd, &rc);
++		LOG_LIMIT(20, __FUNCTION__ << " Pillarbox window after device creation: " << rc.left << "," << rc.top << " " <<
++			(rc.right - rc.left) << "x" << (rc.bottom - rc.top));
++	}
++
+ 	// Log when FPU precision is disabled as it permanently changes the FPU computing
+ 	if (!(BehaviorFlags & D3DCREATE_FPU_PRESERVE))
+ 	{
+@@ -3964,6 +4366,9 @@ HRESULT m_IDirectDrawX::ResetD9Device()
+ 
+ 		// Reset flags and device settings after device creation or reset
+ 		AfterDeviceCreation();
++
++		// TPW: the reset moved and restyled the pillarbox window
++		RestorePillarboxWindow(presParams.hDeviceWindow, DisplayMode.Width, DisplayMode.Height);
+ 	}
+ 	// Release and recreate device
+ 	else
+@@ -4177,7 +4582,13 @@ void m_IDirectDrawX::UpdateVertices(DWORD Width, DWORD Height)
+ {
+ 	// Get width and height
+ 	DWORD displayWidth = 0, displayHeight = 0;
+-	if (Device.Width && Device.Height)
++	if (PillarboxActive && presParams.BackBufferWidth && presParams.BackBufferHeight)
++	{
++		// Back buffer already has the game's aspect ratio
++		displayWidth = presParams.BackBufferWidth;
++		displayHeight = presParams.BackBufferHeight;
++	}
++	else if (Device.Width && Device.Height)
+ 	{
+ 		displayWidth = Device.Width;
+ 		displayHeight = Device.Height;
+@@ -4535,6 +4946,13 @@ void m_IDirectDrawX::ReleaseD3D9IndexBuffer(LPDIRECT3DINDEXBUFFER9& d3d9IndexBuf
+ 
+ void m_IDirectDrawX::ReleaseAllD9Resources(bool BackupData, bool ResetInterface)
+ {
++	// TPW: cached UI state blocks hold d3d9 texture references
++	if (d3d9Device)
++	{
++		m_IDirect3DDeviceX::ReleaseUIStateBlockCaches();
++		TPWReleaseReadbackSurfaces();
++	}
++
+ 	// Remove render target and depth stencil surfaces
+ 	if (d3d9Device && ResetInterface && (RenderTargetSurface || DepthStencilSurface))
+ 	{
+@@ -5770,10 +6188,290 @@ DWORD WINAPI m_IDirectDrawX::PresentThreadFunction(LPVOID)
+ 	return S_OK;
+ }
+ 
++
++// TPW: hang watchdog. When no frame has been presented for 3 seconds it suspends the presenting thread for a moment,
++// copies its instruction pointer and the game return addresses on its stack, resumes it and only then logs them
++// (no allocation or logging while the thread is suspended, it may hold the heap or log lock).
++namespace
++{
++	volatile LONG TPWWatchdogLastPresent = 0;
++	volatile DWORD TPWWatchdogThreadId = 0;
++	HANDLE TPWWatchdogThread = nullptr;
++
++	void TPWDescribeAddress(DWORD Address, char* Out, size_t OutSize)
++	{
++		HMODULE Module = nullptr;
++		char Name[MAX_PATH] = {};
++		if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)(ULONG_PTR)Address, &Module) &&
++			GetModuleFileNameA(Module, Name, MAX_PATH))
++		{
++			const char* Slash = strrchr(Name, '\\');
++			sprintf_s(Out, OutSize, "%s+0x%X", Slash ? Slash + 1 : Name, Address - (DWORD)(ULONG_PTR)Module);
++		}
++		else
++		{
++			sprintf_s(Out, OutSize, "0x%X", Address);
++		}
++	}
++
++	DWORD WINAPI TPWWatchdogProc(LPVOID)
++	{
++		const BYTE* Base = (const BYTE*)GetModuleHandleA(nullptr);
++		const IMAGE_NT_HEADERS* Nt = (const IMAGE_NT_HEADERS*)(Base + ((const IMAGE_DOS_HEADER*)Base)->e_lfanew);
++		const DWORD CodeStart = (DWORD)(ULONG_PTR)(Base + Nt->OptionalHeader.BaseOfCode);
++		const DWORD CodeEnd = (DWORD)(ULONG_PTR)(Base + Nt->OptionalHeader.SizeOfImage);
++		DWORD Samples = 0;
++		DWORD Freezes = 0;
++		bool Frozen = false;
++		while (!Config.Exiting)
++		{
++			Sleep(500);
++			const DWORD Idle = GetTickCount() - (DWORD)TPWWatchdogLastPresent;
++			if (Idle < 3000)
++			{
++				if (Frozen)
++				{
++					Logging::Log() << "TPW watchdog: frames resumed after the freeze";
++					Frozen = false;
++				}
++				Samples = 0;
++				continue;
++			}
++			if (!Frozen)
++			{
++				Frozen = true;
++				Freezes++;
++			}
++			// Sample every 2 seconds, at most 12 times per freeze and 5 freezes per run
++			if (Samples >= 12 || Freezes > 5 || (Samples && Idle < 3000 + Samples * 2000))
++			{
++				continue;
++			}
++			Samples++;
++
++			HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, TPWWatchdogThreadId);
++			if (!hThread)
++			{
++				continue;
++			}
++			CONTEXT Context = {};
++			Context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
++			DWORD Stack[24] = {};
++			DWORD Found = 0;
++			bool Got = false;
++			if (SuspendThread(hThread) != (DWORD)-1)
++			{
++				if (GetThreadContext(hThread, &Context))
++				{
++					Got = true;
++					const DWORD* Sp = (const DWORD*)(ULONG_PTR)Context.Esp;
++					MEMORY_BASIC_INFORMATION mbi = {};
++					if (VirtualQuery(Sp, &mbi, sizeof(mbi)))
++					{
++						const DWORD* Top = (const DWORD*)((const BYTE*)mbi.BaseAddress + mbi.RegionSize);
++						for (const DWORD* s = Sp; s < Top && s < Sp + 4096 && Found < 24; s++)
++						{
++							if (*s >= CodeStart && *s < CodeEnd)
++							{
++								Stack[Found++] = *s;
++							}
++						}
++					}
++				}
++				ResumeThread(hThread);
++			}
++			CloseHandle(hThread);
++			if (!Got)
++			{
++				continue;
++			}
++
++			char Where[MAX_PATH + 32];
++			TPWDescribeAddress(Context.Eip, Where, sizeof(Where));
++			std::string Trace;
++			char Buf[32];
++			for (DWORD x = 0; x < Found; x++)
++			{
++				sprintf_s(Buf, " exe+0x%X", Stack[x] - (DWORD)(ULONG_PTR)Base);
++				Trace += Buf;
++			}
++			Logging::Log() << "TPW watchdog: no frame for " << Idle << " ms, thread " << TPWWatchdogThreadId << " at " << Where <<
++				" eax=" << Logging::hex(Context.Eax) << " ecx=" << Logging::hex(Context.Ecx) << " esi=" << Logging::hex(Context.Esi) <<
++				", game addresses on stack:" << Trace.c_str();
++		}
++		return 0;
++	}
++
++	void TPWWatchdogPresent()
++	{
++		InterlockedExchange(&TPWWatchdogLastPresent, (LONG)GetTickCount());
++		TPWWatchdogThreadId = GetCurrentThreadId();
++		if (!TPWWatchdogThread)
++		{
++			TPWWatchdogThread = CreateThread(nullptr, 0, TPWWatchdogProc, nullptr, 0, nullptr);
++			Logging::Log() << "TPW watchdog started";
++		}
++	}
++}
++
++// TPW: pillarbox state for the window message handler
++bool TPWIsPillarboxActive()
++{
++	return PillarboxActive;
++}
++
++bool TPWIsPillarboxFramed()
++{
++	return PillarboxActive && IsPillarboxFramed();
++}
++
++// TPW: keep the game's aspect ratio while the user resizes the framed pillarbox window (called for WM_SIZING)
++bool TPWPillarboxSizing(HWND hWnd, WPARAM Edge, RECT* pRect)
++{
++	if (!PillarboxActive || !IsPillarboxFramed() || !pRect || !DisplayMode.Width || !DisplayMode.Height)
++	{
++		return false;
++	}
++
++	RECT Frame = {};
++	AdjustWindowRectEx(&Frame, GetWindowLong(hWnd, GWL_STYLE), GetMenu(hWnd) != NULL, GetWindowLong(hWnd, GWL_EXSTYLE));
++	const LONG FrameWidth = Frame.right - Frame.left;
++	const LONG FrameHeight = Frame.bottom - Frame.top;
++
++	// Dragging the top or bottom edge sets the height, everything else sets the width
++	LONG ClientWidth = (pRect->right - pRect->left) - FrameWidth;
++	LONG ClientHeight = (pRect->bottom - pRect->top) - FrameHeight;
++	if (Edge == WMSZ_TOP || Edge == WMSZ_BOTTOM)
++	{
++		ClientWidth = (LONG)((LONGLONG)ClientHeight * DisplayMode.Width / DisplayMode.Height);
++	}
++	ClientWidth = (std::max)(ClientWidth, PillarboxMinClientWidth);
++	ClientHeight = (LONG)((LONGLONG)ClientWidth * DisplayMode.Height / DisplayMode.Width);
++
++	const LONG WindowWidth = ClientWidth + FrameWidth;
++	const LONG WindowHeight = ClientHeight + FrameHeight;
++	if (Edge == WMSZ_LEFT || Edge == WMSZ_TOPLEFT || Edge == WMSZ_BOTTOMLEFT)
++	{
++		pRect->left = pRect->right - WindowWidth;
++	}
++	else
++	{
++		pRect->right = pRect->left + WindowWidth;
++	}
++	if (Edge == WMSZ_TOP || Edge == WMSZ_TOPLEFT || Edge == WMSZ_TOPRIGHT)
++	{
++		pRect->top = pRect->bottom - WindowHeight;
++	}
++	else
++	{
++		pRect->bottom = pRect->top + WindowHeight;
++	}
++	return true;
++}
++
++// TPW: keep the pillarboxed window fitted to its monitor when the desktop resolution changes while the game runs
++// (for example when Parsec switches the resolution). The back buffer keeps its size and is scaled to the window.
++static void TPWCheckPillarboxMonitor(HWND hWnd)
++{
++	static DWORD LastCheck = 0;
++	static RECT LastMonitorRect = {};
++
++	// The windowed pillarbox stays where the user puts it
++	if (!PillarboxActive || Config.DdrawPillarboxWindowed || !IsWindow(hWnd) || !DisplayMode.Width || !DisplayMode.Height ||
++		GetWindowThreadProcessId(hWnd, nullptr) != GetCurrentThreadId())	// Only move the window from its own thread
++	{
++		return;
++	}
++
++	const DWORD Now = GetTickCount();
++	if (Now - LastCheck < 500)
++	{
++		return;
++	}
++	LastCheck = Now;
++
++	MONITORINFO mi = {};
++	mi.cbSize = sizeof(MONITORINFO);
++	if (!GetMonitorInfo(MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST), &mi) || EqualRect(&mi.rcMonitor, &LastMonitorRect))
++	{
++		return;
++	}
++	LastMonitorRect = mi.rcMonitor;
++
++	// Largest rect with the game's aspect ratio, centered on the monitor
++	const LONG MonitorWidth = mi.rcMonitor.right - mi.rcMonitor.left;
++	const LONG MonitorHeight = mi.rcMonitor.bottom - mi.rcMonitor.top;
++	LONG Width = MonitorWidth;
++	LONG Height = MonitorHeight;
++	if ((LONGLONG)DisplayMode.Width * MonitorHeight < (LONGLONG)DisplayMode.Height * MonitorWidth)
++	{
++		Width = (LONG)((LONGLONG)MonitorHeight * DisplayMode.Width / DisplayMode.Height);
++	}
++	else
++	{
++		Height = (LONG)((LONGLONG)MonitorWidth * DisplayMode.Height / DisplayMode.Width);
++	}
++	const LONG Left = mi.rcMonitor.left + (MonitorWidth - Width) / 2;
++	const LONG Top = mi.rcMonitor.top + (MonitorHeight - Height) / 2;
++
++	RECT WindowRect = {};
++	GetWindowRect(hWnd, &WindowRect);
++	if (WindowRect.left == Left && WindowRect.top == Top && WindowRect.right - WindowRect.left == Width && WindowRect.bottom - WindowRect.top == Height)
++	{
++		return;
++	}
++
++	SetWindowPos(hWnd, HWND_TOP, Left, Top, Width, Height, SWP_NOACTIVATE);
++	ShowPillarboxBackdrop(hWnd, mi.rcMonitor);
++	LOG_LIMIT(50, __FUNCTION__ << " Pillarbox: monitor is now " << MonitorWidth << "x" << MonitorHeight << ", window moved to " <<
++		Left << "," << Top << " " << Width << "x" << Height);
++}
++
+ HRESULT m_IDirectDrawX::Present(RECT* pSourceRect, RECT* pDestRect)
+ {
+ 	Logging::LogDebug() << __FUNCTION__ << " (" << this << ")";
+ 
++	TPWCheckPillarboxMonitor(presParams.hDeviceWindow);
++	TPWUpdateMouseTrap(presParams.hDeviceWindow);
++	TPWWatchdogPresent();
++
++	// TPW: put the title bar back if something removed it from the framed pillarbox window
++	if (PillarboxActive && IsPillarboxFramed() && IsWindow(presParams.hDeviceWindow) &&
++		(GetWindowLong(presParams.hDeviceWindow, GWL_STYLE) & WS_CAPTION) != WS_CAPTION &&
++		GetWindowThreadProcessId(presParams.hDeviceWindow, nullptr) == GetCurrentThreadId())
++	{
++		ApplyPillarboxWindowStyle(presParams.hDeviceWindow);
++		SetWindowPos(presParams.hDeviceWindow, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
++		LOG_LIMIT(20, __FUNCTION__ << " Pillarbox: title bar restored");
++	}
++	// Remember where the user keeps the framed window
++	else if (PillarboxActive && IsPillarboxFramed() && IsWindow(presParams.hDeviceWindow) && !IsIconic(presParams.hDeviceWindow) &&
++		(GetWindowLong(presParams.hDeviceWindow, GWL_STYLE) & WS_CAPTION) == WS_CAPTION)
++	{
++		static RECT SavedRect = {};
++		static DWORD ChangeTick = 0;
++		GetWindowRect(presParams.hDeviceWindow, &PillarboxLastWindowRect);
++
++		// Save it once it has stopped changing for a second
++		if (!EqualRect(&SavedRect, &PillarboxLastWindowRect))
++		{
++			if (!ChangeTick)
++			{
++				ChangeTick = GetTickCount();
++			}
++			else if (GetTickCount() - ChangeTick > 1000)
++			{
++				SavePillarboxWindowRect(PillarboxLastWindowRect);
++				SavedRect = PillarboxLastWindowRect;
++				ChangeTick = 0;
++			}
++		}
++		else
++		{
++			ChangeTick = 0;
++		}
++	}
++
+ #ifdef ENABLE_PROFILING
+ 	auto startTime = std::chrono::high_resolution_clock::now();
+ #endif
+@@ -6001,6 +6699,12 @@ void m_IDirectDrawX::CheckFixWindowPos(HWND hWnd, WINDOWPOS* wPos)
+ 		return;
+ 	}
+ 
++	// TPW: the pillarbox code places and sizes the window itself
++	if (PillarboxActive)
++	{
++		return;
++	}
++
+ 	// If window size doesn't match
+ 	if ((UINT)wPos->cx != presParams.BackBufferWidth || (UINT)wPos->cy != presParams.BackBufferHeight)
+ 	{
+diff --git a/ddraw/ddraw.cpp b/ddraw/ddraw.cpp
+index 73a7fe33..e0127f0f 100644
+--- a/ddraw/ddraw.cpp
++++ b/ddraw/ddraw.cpp
+@@ -18,6 +18,8 @@
+ */
+ 
+ #include "ddraw.h"
++#include <intrin.h>
++#include <string>
+ #include "deque"
+ #include "Dllmain\Dllmain.h"
+ #include "d3d9\d3d9External.h"
+@@ -84,6 +86,121 @@ static HRESULT DirectDrawEnumerateHandler(LPVOID lpCallback, LPVOID lpContext, D
+ 
+ using namespace DdrawWrapper;
+ 
++// TPW: record which game code asks the process to quit (game IAT hooks for ExitProcess, TerminateProcess,
++// PostQuitMessage and DestroyWindow). Each call logs the game return addresses found on the stack.
++namespace
++{
++	typedef VOID(WINAPI* ExitProcessProc)(UINT);
++	typedef BOOL(WINAPI* TerminateProcessProc)(HANDLE, UINT);
++	typedef VOID(WINAPI* PostQuitMessageProc)(int);
++	typedef BOOL(WINAPI* DestroyWindowProc)(HWND);
++	ExitProcessProc TPWExitProcess_out = nullptr;
++	TerminateProcessProc TPWTerminateProcess_out = nullptr;
++	PostQuitMessageProc TPWPostQuitMessage_out = nullptr;
++	DestroyWindowProc TPWDestroyWindow_out = nullptr;
++
++	void TPWLogQuitCaller(const char* Func, void* Caller, DWORD Value)
++	{
++		const BYTE* Base = (const BYTE*)GetModuleHandleA(nullptr);
++		const IMAGE_NT_HEADERS* Nt = (const IMAGE_NT_HEADERS*)(Base + ((const IMAGE_DOS_HEADER*)Base)->e_lfanew);
++		const BYTE* End = Base + Nt->OptionalHeader.SizeOfImage;
++		std::string Trace;
++		char Buf[32];
++		DWORD Found = 0;
++		const DWORD* Stack = (const DWORD*)&Caller;
++		NT_TIB* Tib = (NT_TIB*)NtCurrentTeb();
++		for (DWORD x = 0; x < 2048 && Found < 16 && (const BYTE*)(Stack + x + 1) <= (const BYTE*)Tib->StackBase; x++)
++		{
++			const BYTE* v = (const BYTE*)Stack[x];
++			if (v > Base + Nt->OptionalHeader.BaseOfCode && v < End)
++			{
++				sprintf_s(Buf, " exe+0x%X", (DWORD)(v - Base));
++				Trace += Buf;
++				Found++;
++			}
++		}
++		sprintf_s(Buf, "exe+0x%X", (DWORD)((const BYTE*)Caller - Base));
++		Logging::Log() << "TPW: game called " << Func << "(" << Value << ") from " << Buf << " thread " << GetCurrentThreadId() <<
++			", game addresses on stack:" << Trace.c_str();
++	}
++
++	VOID WINAPI TPWExitProcess(UINT uExitCode)
++	{
++		TPWLogQuitCaller("ExitProcess", _ReturnAddress(), uExitCode);
++		TPWExitProcess_out(uExitCode);
++	}
++
++	BOOL WINAPI TPWTerminateProcess(HANDLE hProcess, UINT uExitCode)
++	{
++		TPWLogQuitCaller("TerminateProcess", _ReturnAddress(), uExitCode);
++		return TPWTerminateProcess_out(hProcess, uExitCode);
++	}
++
++	VOID WINAPI TPWPostQuitMessage(int nExitCode)
++	{
++		TPWLogQuitCaller("PostQuitMessage", _ReturnAddress(), (DWORD)nExitCode);
++		TPWPostQuitMessage_out(nExitCode);
++	}
++
++	BOOL WINAPI TPWDestroyWindow(HWND hWnd)
++	{
++		TPWLogQuitCaller("DestroyWindow", _ReturnAddress(), (DWORD)(ULONG_PTR)hWnd);
++		return TPWDestroyWindow_out(hWnd);
++	}
++
++	// Replaces one import of the game exe, returns the original function
++	void* TPWPatchGameImport(const char* DllName, const char* FuncName, void* NewFunc)
++	{
++		BYTE* Base = (BYTE*)GetModuleHandleA(nullptr);
++		IMAGE_NT_HEADERS* Nt = (IMAGE_NT_HEADERS*)(Base + ((IMAGE_DOS_HEADER*)Base)->e_lfanew);
++		const IMAGE_DATA_DIRECTORY& Dir = Nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
++		if (!Dir.VirtualAddress)
++		{
++			return nullptr;
++		}
++		for (IMAGE_IMPORT_DESCRIPTOR* Desc = (IMAGE_IMPORT_DESCRIPTOR*)(Base + Dir.VirtualAddress); Desc->Name; Desc++)
++		{
++			if (_stricmp((const char*)(Base + Desc->Name), DllName) != 0 || !Desc->OriginalFirstThunk)
++			{
++				continue;
++			}
++			IMAGE_THUNK_DATA* Names = (IMAGE_THUNK_DATA*)(Base + Desc->OriginalFirstThunk);
++			IMAGE_THUNK_DATA* Funcs = (IMAGE_THUNK_DATA*)(Base + Desc->FirstThunk);
++			for (; Names->u1.AddressOfData; Names++, Funcs++)
++			{
++				if (IMAGE_SNAP_BY_ORDINAL(Names->u1.Ordinal))
++				{
++					continue;
++				}
++				const IMAGE_IMPORT_BY_NAME* Import = (const IMAGE_IMPORT_BY_NAME*)(Base + Names->u1.AddressOfData);
++				if (strcmp((const char*)Import->Name, FuncName) == 0)
++				{
++					void* Original = (void*)Funcs->u1.Function;
++					DWORD OldProtect = 0;
++					if (VirtualProtect(&Funcs->u1.Function, sizeof(Funcs->u1.Function), PAGE_READWRITE, &OldProtect))
++					{
++						Funcs->u1.Function = (ULONG_PTR)NewFunc;
++						VirtualProtect(&Funcs->u1.Function, sizeof(Funcs->u1.Function), OldProtect, &OldProtect);
++						return Original;
++					}
++					return nullptr;
++				}
++			}
++		}
++		return nullptr;
++	}
++
++	void TPWInstallQuitHooks()
++	{
++		TPWExitProcess_out = (ExitProcessProc)TPWPatchGameImport("kernel32.dll", "ExitProcess", TPWExitProcess);
++		TPWTerminateProcess_out = (TerminateProcessProc)TPWPatchGameImport("kernel32.dll", "TerminateProcess", TPWTerminateProcess);
++		TPWPostQuitMessage_out = (PostQuitMessageProc)TPWPatchGameImport("user32.dll", "PostQuitMessage", TPWPostQuitMessage);
++		TPWDestroyWindow_out = (DestroyWindowProc)TPWPatchGameImport("user32.dll", "DestroyWindow", TPWDestroyWindow);
++		Logging::Log() << "TPW: quit hooks installed: ExitProcess " << (TPWExitProcess_out != nullptr) << " TerminateProcess " << (TPWTerminateProcess_out != nullptr) <<
++			" PostQuitMessage " << (TPWPostQuitMessage_out != nullptr) << " DestroyWindow " << (TPWDestroyWindow_out != nullptr);
++	}
++}
++
+ // ******************************
+ // ddraw.dll export functions
+ // ******************************
+@@ -782,6 +899,7 @@ void InitDDraw()
+ 	if (RunOnce)
+ 	{
+ 		Logging::Log() << "Installing GDI & User32 hooks";
++		TPWInstallQuitHooks();
+ 		using namespace GdiWrapper;
+ 		if (!GetModuleHandleA("gdi32.dll")) LoadLibrary("gdi32.dll");
+ 		if (!GetModuleHandleA("user32.dll")) LoadLibrary("user32.dll");

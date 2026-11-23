@@ -1,0 +1,40 @@
+diff --git a/Logging.h b/Logging.h
+index d363d33..51f10b3 100644
+--- a/Logging.h
++++ b/Logging.h
+@@ -375,7 +375,34 @@ namespace Logging
+ 		template <typename T> LogNull& operator<<(const T&) { return *this; }
+ 	};
+ 
+-	typedef LogNull LogDebug;
++	// TPW stall trace: release builds count the functions named by LogDebug while rendering has stopped
++	namespace StallTrace
++	{
++		extern volatile bool Enabled;
++		void Record(const char* Name);
++	}
++
++	class LogDebugTrace
++	{
++		bool First = true;
++	public:
++		LogDebugTrace& operator<<(const char* Name)
++		{
++			if (First)
++			{
++				First = false;
++				if (StallTrace::Enabled)
++				{
++					StallTrace::Record(Name);
++				}
++			}
++			return *this;
++		}
++		template <size_t N> LogDebugTrace& operator<<(const char(&Name)[N]) { return *this << static_cast<const char*>(Name); }
++		template <typename T> LogDebugTrace& operator<<(const T&) { First = false; return *this; }
++	};
++
++	typedef LogDebugTrace LogDebug;
+ 
+ 	class LogEnter : public LogNull
+ 	{

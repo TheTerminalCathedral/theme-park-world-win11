@@ -1,0 +1,23 @@
+{
+  "name": "TPW-Win11-Fix",
+  "version": "beta1",
+  "status": "beta",
+  "download_url": "https://github.com/TheTerminalCathedral/theme-park-world-win11/releases/download/beta1/TPW-Win11-Fix-beta1.zip",
+  "archive": {
+    "file": "TPW-Win11-Fix-beta1.zip",
+    "sha256": "884a51bf139aa72af6bf64966f6e255204892b0a6315d2108c7440b447a77998"
+  },
+  "install_next_to": "TP.EXE",
+  "files": [
+    { "file": "dxwrapper.dll", "sha256": "6b75f29b6f987d5b5695d7fd473ae11e0c46b9e725f18080468e217936378bec" },
+    { "file": "ddraw.dll", "sha256": "b8b878e29c2931d6a8d064665c4c93edb28a0105152e7247f8f543c1603985c3" },
+    { "file": "dxwrapper.ini", "sha256": "f5d577b6b354682224f46aad49b66b14312bce9bd57e1fe22551a30ecbe29580" }
+  ],
+  "tested": { "os": "Windows 11", "game": "English 2.0", "computers": 1 },
+  "adjustable_settings": {
+    "LimitPerFrameFPS": [30],
+    "DdrawPillarboxWindowed": [0, 1, 2],
+    "DdrawSkipRenderTargetReadback": [0, 1]
+  },
+  "base": "elishacloud/dxwrapper d77702d5"
+}

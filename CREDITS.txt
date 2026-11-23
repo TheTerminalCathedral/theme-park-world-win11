@@ -1,0 +1,28 @@
+dxwrapper.dll in this package is a MODIFIED version of dxwrapper. It is not the
+original software and the dxwrapper author does not support it.
+
+dxwrapper, by Elisha Riedlinger (elishacloud) - zlib license
+  https://github.com/elishacloud/dxwrapper  (based on commit d77702d5)
+Geometry conversion for RTX Remix, present in the DLL but off in this release:
+  Daniel Kollmann  https://github.com/dkollmann/dxwrapper
+  mencelot and contributors
+  https://github.com/mencelot/DK2-Remix-Predetermined-Hashing
+
+Components bundled in dxwrapper: DDrawCompat, d3d8to9 (Patrick Mours), Detours
+and DirectXMath (Microsoft), Hooking.Patterns (Bas Timmer/NTAuthority et al.),
+imgui (Omar Cornut), MemoryModule (fancycode, Mozilla Public License 2.0, source:
+https://github.com/fancycode/MemoryModule), dinputto8, Hooking and Logging
+(elishacloud). License texts are in the licenses folder.
+
+Our changes are in the source folder as patches.
+Theme Park World changes: developed with Claude Code (Anthropic).
+Theme Park World / Sim Theme Park is the property of its respective owners.
+
+
+The AI-assisted installation method uses:
+AI Madpakken
+Created by Dan Almer Jensen.
+Canonical upstream: https://github.com/TheTerminalCathedral/AI-Madpakken
+Licensed under Creative Commons Attribution 4.0 International (CC BY 4.0).
+https://creativecommons.org/licenses/by/4.0/
+Changes: none. It is referenced, not included.
